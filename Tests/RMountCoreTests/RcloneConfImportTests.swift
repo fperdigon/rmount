@@ -178,8 +178,8 @@ final class RcloneConfImporterTests: XCTestCase {
     }
 
     func testUnsupportedTypeAndRevealFailure() {
-        XCTAssertEqual(reason(convert("crypt", ["remote": "x:"])), "Type \"crypt\" is not supported by rmount yet")
-        XCTAssertEqual(reason(convert("", [:])), "Type \"(none)\" is not supported by rmount yet")
+        XCTAssertEqual(reason(convert("crypt", ["remote": "x:"])), "Type \"crypt\" is not supported by RMount yet")
+        XCTAssertEqual(reason(convert("", [:])), "Type \"(none)\" is not supported by RMount yet")
         let failed = reason(convert("ftp", ["host": "h", "pass": "not-obscured"]))
         XCTAssertTrue(failed?.hasPrefix("Could not read a saved password") == true, failed ?? "")
     }
