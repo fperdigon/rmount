@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Checks release DMGs the way a user's Mac will treat them, without launching the app.
 #
-#   scripts/verify-dmg.sh dist/macsh-0.1.3.dmg [dist/macsh-lite-0.1.3.dmg ...]
+#   scripts/verify-dmg.sh dist/rmount-0.1.3.dmg [dist/rmount-lite-0.1.3.dmg ...]
 #
 # Per DMG: image checksum, drag-to-install layout, Info.plist, architecture, a valid code
-# signature on the whole bundle, the bundled rclone (macsh only), and what Gatekeeper says
+# signature on the whole bundle, the bundled rclone (rmount only), and what Gatekeeper says
 # about the app after a simulated download (quarantine flag). Exit status is non-zero if
 # anything is wrong. "Rejected" by Gatekeeper is expected for apps without a Developer ID;
-# "cannot assess" is not: that is what users see as "macsh is damaged and can't be opened".
+# "cannot assess" is not: that is what users see as "rmount is damaged and can't be opened".
 set -uo pipefail
 
 [ $# -ge 1 ] || { echo "usage: $0 file.dmg [file.dmg ...]" >&2; exit 2; }
@@ -39,7 +39,9 @@ verify_one() {
     if [ -n "$bid" ] && [ -n "$ver" ]; then pass "Info.plist: $bid $ver"; else fail "Info.plist lacks bundle id or version"; fi
     case "$dmg" in *"-$ver.dmg") pass "DMG file name matches version $ver";; *) note "file name does not end in -$ver.dmg";; esac
 
-    local exe="$app/Contents/MacOS/$name"
+    # The folder name is not the executable name for a legacy-named alias (macsh.app holds `rmount`).
+    local exename; exename="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist" 2>/dev/null)"
+    local exe="$app/Contents/MacOS/${exename:-$name}"
     if [ -x "$exe" ] && lipo -archs "$exe" 2>/dev/null | grep -qw arm64; then pass "executable is arm64"; else fail "missing or non-arm64 executable"; fi
     local minos; minos="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist" 2>/dev/null || true)"
     [ -n "$minos" ] && note "requires macOS $minos or later"
@@ -51,8 +53,8 @@ verify_one() {
         fail "invalid code signature: ${sig##*: }  (users get 'damaged and can't be opened')"
     fi
 
-    case "$name" in
-        macsh-lite) [ -e "$app/Contents/Resources/rclone" ] && note "lite flavour contains rclone (unexpected)" || pass "lite flavour: no bundled rclone, as intended" ;;
+    case "${exename:-$name}" in
+        rmount-lite) [ -e "$app/Contents/Resources/rclone" ] && note "lite flavour contains rclone (unexpected)" || pass "lite flavour: no bundled rclone, as intended" ;;
         *)
             local rc="$app/Contents/Resources/rclone"
             if [ -x "$rc" ] && lipo -archs "$rc" 2>/dev/null | grep -qw arm64 && "$rc" version >/dev/null 2>&1; then

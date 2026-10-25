@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Benchmark a mounted macsh remote: listing latency, upload and cold-read throughput.
+"""Benchmark a mounted rmount remote: listing latency, upload and cold-read throughput.
 
     scripts/bench-mount.py MOUNTPOINT [--files 3] [--size-mb 50] [--keep] [--json]
 
-Writes N random files into a fresh `macsh-bench-<timestamp>/` folder on the mount, so use a
+Writes N random files into a fresh `rmount-bench-<timestamp>/` folder on the mount, so use a
 remote you are happy to write to. Needs only the Python standard library plus the macOS tools
 `mount`, `nfsstat` and `nettop`.
 
@@ -129,10 +129,10 @@ def main(argv=None):
     port = server_port(source, fstype, args.mountpoint, sh("/usr/bin/nfsstat", "-m"))
     pid = sh("pgrep", "-f", f"rclone serve .*--addr 127.0.0.1:{port}").split()[:1] if port else []
     if not pid:
-        sys.exit("this does not look like a macsh mount (no local rclone server found)")
+        sys.exit("this does not look like a rmount mount (no local rclone server found)")
     pid = pid[0]
 
-    folder = f"macsh-bench-{time.strftime('%Y%m%d-%H%M%S')}"
+    folder = f"rmount-bench-{time.strftime('%Y%m%d-%H%M%S')}"
     root = os.path.join(args.mountpoint, folder)
     names = [f"bench_{args.size_mb}MB_{i + 1}.bin" for i in range(args.files)]
     size = args.size_mb * MB

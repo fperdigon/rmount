@@ -1,30 +1,30 @@
 #!/usr/bin/env bash
-# Manual integration test: prove macsh can mount the host's own sshd as a WebDAV volume.
+# Manual integration test: prove rmount can mount the host's own sshd as a WebDAV volume.
 #
 # This script uses LOCALHOST sshd (no Docker, nothing leaves the machine).
-# Run on the Mac the macsh app is built on.
+# Run on the Mac the rmount app is built on.
 #
 # Prerequisites:
 #   1. "Remote Login" enabled in System Settings → General → Sharing.
 #      (Equivalent to: sudo systemsetup -setremotelogin on)
 #   2. Your account password handy (or an SSH key in ~/.ssh/).
-#   3. macsh.app built and runnable from Xcode.
+#   3. rmount.app built and runnable from Xcode.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-FIXTURE_DIR="$HOME/macsh-sftp-fixture"
+FIXTURE_DIR="$HOME/rmount-sftp-fixture"
 mkdir -p "$FIXTURE_DIR"
 echo "phase1-roundtrip-marker $(date -u +%FT%TZ)" > "$FIXTURE_DIR/marker.txt"
 
 echo
-echo "=== macsh Phase 1 manual integration test ==="
+echo "=== rmount Phase 1 manual integration test ==="
 echo
 echo "Fixture directory:  $FIXTURE_DIR"
 echo "Local sshd port:    22 (verify: 'sudo systemsetup -getremotelogin')"
 echo "Local user:         $USER"
 echo
-echo "1. In macsh, click 'Add remote…' and enter:"
+echo "1. In rmount, click 'Add remote…' and enter:"
 echo "     Display name : phase1-test"
 echo "     Host         : 127.0.0.1"
 echo "     Port         : 22"

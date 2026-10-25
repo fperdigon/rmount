@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Downloads the latest arm64 (Apple Silicon) rclone macOS binary into
-# App/macsh/Resources/rclone. Run from the repo root before opening the
+# App/rmount/Resources/rclone. Run from the repo root before opening the
 # Xcode project (and in CI before xcodebuild archive).
 #
-# macsh ships Apple Silicon only — no Intel builds.
+# rmount ships Apple Silicon only — no Intel builds.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-DEST_DIR="App/macsh/Resources"
+DEST_DIR="App/rmount/Resources"
 DEST="$DEST_DIR/rclone"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

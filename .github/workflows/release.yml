@@ -31,7 +31,7 @@ jobs:
       - name: Check tag matches app version
         if: github.ref_type == 'tag'
         run: |
-          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' App/macsh/Resources/Info.plist)"
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' App/rmount/Resources/Info.plist)"
           if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
             echo "::error::Tag ${GITHUB_REF_NAME} does not match Info.plist version ${version}"
             exit 1

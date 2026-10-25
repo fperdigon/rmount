@@ -11,28 +11,28 @@ _spec.loader.exec_module(bench)
 
 MOUNT = """\
 /dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
-127.0.0.1:/ on /Users/fco/macsh/DevEnv (nfs, nodev, nosuid, mounted by fco)
+127.0.0.1:/ on /Users/fco/rmount/DevEnv (nfs, nodev, nosuid, mounted by fco)
 http://127.0.0.1:49165/Docs/ on /Volumes/Docs (webdav, nodev, nosuid, mounted by fco)
-192.168.1.5:/export on /Users/fco/macsh/Nas (nfs, nodev, nosuid, mounted by fco)
+192.168.1.5:/export on /Users/fco/rmount/Nas (nfs, nodev, nosuid, mounted by fco)
 """
 
 NFSSTAT = """\
-/Users/fco/macsh/DevEnv from 127.0.0.1:/
+/Users/fco/rmount/DevEnv from 127.0.0.1:/
   -s sys
   NFS parameters: vers=3,tcp,port=54924,mountport=54924,soft,noresvport,nolocks
-/Users/fco/macsh/Other from 127.0.0.1:/
+/Users/fco/rmount/Other from 127.0.0.1:/
   NFS parameters: vers=3,tcp,port=55300,mountport=55300,soft
 """
 
 
 class FindMountTests(unittest.TestCase):
     def test_finds_nfs_and_webdav_mounts(self):
-        self.assertEqual(bench.find_mount(MOUNT, "/Users/fco/macsh/DevEnv"), ("127.0.0.1:/", "nfs"))
+        self.assertEqual(bench.find_mount(MOUNT, "/Users/fco/rmount/DevEnv"), ("127.0.0.1:/", "nfs"))
         self.assertEqual(bench.find_mount(MOUNT, "/Volumes/Docs"),
                          ("http://127.0.0.1:49165/Docs/", "webdav"))
 
     def test_unknown_path_is_not_a_mount(self):
-        self.assertIsNone(bench.find_mount(MOUNT, "/Users/fco/macsh/nope"))
+        self.assertIsNone(bench.find_mount(MOUNT, "/Users/fco/rmount/nope"))
         self.assertIsNone(bench.find_mount(MOUNT, "/Users/fco"))
 
 
@@ -41,12 +41,12 @@ class ServerPortTests(unittest.TestCase):
         self.assertEqual(bench.server_port("http://127.0.0.1:49165/Docs/", "webdav", "/Volumes/Docs", ""), 49165)
 
     def test_nfs_port_comes_from_nfsstat_for_the_right_mount(self):
-        self.assertEqual(bench.server_port("127.0.0.1:/", "nfs", "/Users/fco/macsh/DevEnv", NFSSTAT), 54924)
-        self.assertEqual(bench.server_port("127.0.0.1:/", "nfs", "/Users/fco/macsh/Other", NFSSTAT), 55300)
+        self.assertEqual(bench.server_port("127.0.0.1:/", "nfs", "/Users/fco/rmount/DevEnv", NFSSTAT), 54924)
+        self.assertEqual(bench.server_port("127.0.0.1:/", "nfs", "/Users/fco/rmount/Other", NFSSTAT), 55300)
 
     def test_remote_nfs_and_unknown_cases_have_no_port(self):
-        self.assertIsNone(bench.server_port("192.168.1.5:/export", "nfs", "/Users/fco/macsh/Nas", NFSSTAT))
-        self.assertIsNone(bench.server_port("127.0.0.1:/", "nfs", "/Users/fco/macsh/Missing", NFSSTAT))
+        self.assertIsNone(bench.server_port("192.168.1.5:/export", "nfs", "/Users/fco/rmount/Nas", NFSSTAT))
+        self.assertIsNone(bench.server_port("127.0.0.1:/", "nfs", "/Users/fco/rmount/Missing", NFSSTAT))
         self.assertIsNone(bench.server_port("https://example.com/", "webdav", "/Volumes/x", ""))
         self.assertIsNone(bench.server_port("x", "hfs", "/Volumes/x", ""))
 
@@ -101,7 +101,7 @@ class EvictTests(unittest.TestCase):
             vfs, meta = os.path.join(tmp, "vfs"), os.path.join(tmp, "vfsMeta")
             keep = []
             for root in (vfs, meta):
-                d = os.path.join(root, "r{abc}", "macsh-bench-1")
+                d = os.path.join(root, "r{abc}", "rmount-bench-1")
                 os.makedirs(d)
                 for name in ("a.bin", "b.bin", "other.txt"):
                     open(os.path.join(d, name), "w").close()
@@ -110,7 +110,7 @@ class EvictTests(unittest.TestCase):
                 os.makedirs(other)
                 open(os.path.join(other, "a.bin"), "w").close()
                 keep.append(os.path.join(other, "a.bin"))
-            removed = bench.evict_cached_files([vfs, meta], "macsh-bench-1", ["a.bin", "b.bin"])
+            removed = bench.evict_cached_files([vfs, meta], "rmount-bench-1", ["a.bin", "b.bin"])
             self.assertEqual(removed, 4)
             self.assertTrue(all(os.path.exists(p) for p in keep))
 

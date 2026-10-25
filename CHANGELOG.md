@@ -6,6 +6,27 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Renamed from macsh to RMount.** The app is now `rmount.app` / `rmount-lite.app`, the DMGs are
+  `rmount-<version>.dmg` / `rmount-lite-<version>.dmg`, the repository is `fperdigon/rmount`, the Swift
+  module is `RMountCore`, and NFS mounts live in `~/rmount/<name>`. Credit to the original author is in
+  the README, `NOTICE` and `CONTRIBUTORS.md`.
+- **Identifiers renamed too, with the old ones kept as aliases.** The bundle ids are now
+  `ai.rmount` / `ai.rmount.lite` and the preference keys `rmount.*`. On first launch the app copies
+  `~/Library/Application Support/ai.macsh*` (remotes, known hosts, logs) to the new folder, reads
+  Keychain secrets stored under the old service name and copies them forward, copies the old
+  `macsh.*` preferences, and still cleans up leftover NFS mounts under `~/macsh`. The old data is
+  never modified or removed, so going back to an older version works.
+- **Updating from macsh is automatic.** Releases also carry `macsh-<version>.dmg` and
+  `macsh-lite-<version>.dmg` (the same RMount build under the old names); an installed macsh
+  finds them with its old updater and upgrades in place. RMount renames `macsh.app` to
+  `rmount.app` on its next update. The updater also still accepts releases that only have `macsh-*`
+  assets, and CI accepts the old `MACSH_IT_*` secret names.
+- **One manual step after upgrading:** re-enable "Launch at login" in Settings, because macOS ties
+  that setting to the bundle id.
+- The aliases are temporary: see "Legacy aliases" in `AGENTS.md` for the list and when they go.
+
 ## [0.1.4] — 2026-10-17
 
 ### Added

@@ -2,23 +2,23 @@
 import PackageDescription
 
 let package = Package(
-    name: "MacshCore",
+    name: "RMountCore",
     platforms: [.macOS(.v14)],
     products: [
-        .library(name: "MacshCore", targets: ["MacshCore"]),
+        .library(name: "RMountCore", targets: ["RMountCore"]),
     ],
     targets: [
         .target(
-            name: "MacshCore",
-            path: "Sources/MacshCore",
+            name: "RMountCore",
+            path: "Sources/RMountCore",
             linkerSettings: [
                 .linkedFramework("NetFS"),
             ]
         ),
         .testTarget(
-            name: "MacshCoreTests",
-            dependencies: ["MacshCore"],
-            path: "Tests/MacshCoreTests"
+            name: "RMountCoreTests",
+            dependencies: ["RMountCore"],
+            path: "Tests/RMountCoreTests"
         ),
     ]
 )
