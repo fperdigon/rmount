@@ -241,7 +241,7 @@ private struct UpdatesPane: View {
 
     private var running: String {
         let b = BuildInfo.current
-        return b.isDevBuild ? "RMount \(b.version) (local build)" : "RMount \(b.version) (\(b.shortSHA))"
+        return "RMount \(b.version)"
     }
 
     var body: some View {
@@ -293,9 +293,6 @@ private struct AboutPane: View {
     var version: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
     }
-    var build: String {
-        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
-    }
     var bundleName: String {
         Bundle.main.infoDictionary?["CFBundleName"] as? String ?? "RMount"
     }
@@ -308,7 +305,7 @@ private struct AboutPane: View {
                 .foregroundStyle(.tint)
             Text(bundleName)
                 .font(.title2.weight(.semibold))
-            Text("Version \(version) (\(build))")
+            Text("Version \(version)")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Link("github.com/fperdigon/rmount",
