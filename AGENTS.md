@@ -123,11 +123,10 @@ old name, so an older version keeps working side by side.
 | bundle ids `ai.macsh`, `ai.macsh.lite` | `ai.rmount`, `ai.rmount.lite` | `AppPaths` copies the old Application Support folder once; `KeychainService` falls back to the old service and copies the secret forward; `UserPreferences` copies the old domain's values |
 | preference keys `macsh.*` | `rmount.*` | copied once per install (`rmount.legacyPreferencesMigrated`) |
 | `~/macsh/<name>` NFS mounts | `~/rmount/<name>` | `Mounter` still looks there for leftover mounts |
-| release assets `macsh-*.dmg` | `rmount-*.dmg` | `UpdateChecker.selectAsset` prefers new, accepts old; `build-release.sh` also builds `macsh-*.dmg` holding `macsh.app` so old updaters can upgrade; `UpdateInstaller.install` moves `macsh.app` to `rmount.app` |
+| release assets `macsh-*.dmg` | `rmount-*.dmg` | `UpdateChecker.selectAsset` prefers new, accepts old; `UpdateInstaller.install` moves `macsh.app` to `rmount.app`. Releases no longer publish `macsh-*.dmg` (dropped: only two downloads ever, so no one was left to bridge) |
 | Info.plist key `MacshBuildSHA` | `RMountBuildSHA` | `BuildInfo` falls back to the old key |
 | CI secrets `MACSH_IT_*` | `RMOUNT_IT_*` | workflow uses `RMOUNT_IT_* \|\| MACSH_IT_*`; `IntegrationEnv.require` accepts both |
 
-**Removal:** drop the aliases (delete `LegacyNames.swift` and each use, the `make_legacy_dmg` step and
-its verify call, the `MACSH_IT_*` fallbacks) in the first release that is at least six months after
+**Removal:** drop the aliases (delete `LegacyNames.swift` and each use, the `MACSH_IT_*` fallbacks) in the first release that is at least six months after
 the first RMount release, or earlier once no install of macsh can still be updating. Do it in one PR,
 and add a CHANGELOG line that old data is no longer migrated.

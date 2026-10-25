@@ -94,7 +94,8 @@ Pick one. They can coexist if you want both.
 
 ### Coming from macsh?
 
-Install RMount normally, or just update macsh from inside the app: it upgrades in place to RMount.
+Install RMount from the [latest release](https://github.com/fperdigon/rmount/releases). Updating macsh from inside the app no
+longer works, because releases no longer carry `macsh-*` files.
 Your remotes, passwords and settings are carried over automatically, and the old data is left
 untouched. Re-enable *Launch at login* in Settings afterwards.
 
