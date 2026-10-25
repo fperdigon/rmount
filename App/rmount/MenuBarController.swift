@@ -13,6 +13,7 @@ final class MenuBarController {
     private var addWindow: NSWindow?
     private var importWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    private let settingsNavigator = SettingsView.Navigator()
     private var editWindows: [UUID: NSWindow] = [:]
     private var logWindows: [UUID: NSWindow] = [:]
     private let updater: UpdateController
@@ -46,11 +47,22 @@ final class MenuBarController {
             menu.addItem(NSMenuItem(title: "(no remotes)", action: nil, keyEquivalent: ""))
         } else {
             for session in manager.sessions {
-                let item = NSMenuItem(title: title(for: session), action: #selector(toggleMount(_:)), keyEquivalent: "")
+                let item = NSMenuItem(
+                    title: title(for: session),
+                    action: isMounted(session) ? #selector(openInFinder(_:)) : #selector(toggleMount(_:)),
+                    keyEquivalent: ""
+                )
                 item.target = self
                 item.representedObject = session.id
                 let submenu = NSMenu()
                 submenu.autoenablesItems = false
+                if case .mounted = session.status {
+                    let open = NSMenuItem(title: "Open in Finder", action: #selector(openInFinder(_:)), keyEquivalent: "")
+                    open.target = self
+                    open.representedObject = session.id
+                    submenu.addItem(open)
+                    submenu.addItem(NSMenuItem.separator())
+                }
                 let mountToggle = NSMenuItem(
                     title: isMounted(session) ? "Unmount" : "Mount",
                     action: #selector(toggleMount(_:)),
@@ -87,6 +99,9 @@ final class MenuBarController {
         let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
+        let about = NSMenuItem(title: "About RMount", action: #selector(showAbout), keyEquivalent: "")
+        about.target = self
+        menu.addItem(about)
         let checkUpdates = NSMenuItem(title: "Check for updates…", action: #selector(checkForUpdates), keyEquivalent: "")
         checkUpdates.target = self
         menu.addItem(checkUpdates)
@@ -168,6 +183,13 @@ final class MenuBarController {
         Self.present(editWindows[id])
     }
 
+    @objc private func openInFinder(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID,
+              let session = manager.sessions.first(where: { $0.id == id }),
+              case .mounted(let path) = session.status else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
     @objc private func showLog(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? UUID else { return }
         let url = manager.logURL(for: id)
@@ -207,8 +229,17 @@ final class MenuBarController {
     }
 
     @objc private func showSettings() {
+        openSettings(tab: .general)
+    }
+
+    @objc private func showAbout() {
+        openSettings(tab: .about)
+    }
+
+    private func openSettings(tab: SettingsView.Tab) {
+        settingsNavigator.tab = tab
         if settingsWindow == nil {
-            let view = SettingsView(loginItemManager: loginItemManager, prefs: prefs, onCheckForUpdates: { [weak self] in self?.updater.checkNow() })
+            let view = SettingsView(navigator: settingsNavigator, loginItemManager: loginItemManager, prefs: prefs, onCheckForUpdates: { [weak self] in self?.updater.checkNow() })
             let host = NSHostingController(rootView: view)
             let win = NSWindow(contentViewController: host)
             win.title = "Settings"
