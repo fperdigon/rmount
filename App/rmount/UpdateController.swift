@@ -52,7 +52,7 @@ final class UpdateController {
     }
 
     private func offer(_ update: AvailableUpdate, build: BuildInfo, allowSkip: Bool) async {
-        let running = build.isDevBuild ? "v\(build.version) (local build)" : "v\(build.version) (\(build.shortSHA))"
+        let running = "v\(build.version)"
         let alert = NSAlert()
         alert.messageText = "Update available"
         var text = "You're on \(running).\n\(update.label) is available on the \(update.channel.displayName.lowercased()) channel."

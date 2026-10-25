@@ -8,6 +8,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The version is shown without a trailing build number or commit in parentheses.
 - **Renamed from macsh to RMount.** The app is now `rmount.app` / `rmount-lite.app`, the DMGs are
   `rmount-<version>.dmg` / `rmount-lite-<version>.dmg`, the repository is `fperdigon/rmount`, the Swift
   module is `RMountCore`, and NFS mounts live in `~/rmount/<name>`. Credit to the original author is in
