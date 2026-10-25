@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Starts real SFTP (sshd), FTP and S3 servers on localhost for the integration tests and
-# exports MACSH_IT_* variables to $GITHUB_ENV. Meant for macOS CI runners .
+# exports RMOUNT_IT_* variables to $GITHUB_ENV. Meant for macOS CI runners .
 #   SFTP: asyncssh server on port 2222, password + key auth
 #   FTP : pyftpdlib (pip, in a venv)
 #   S3  : `rclone serve s3` (S3 protocol server backed by a directory)
 #   SMB : Samba (smbd, unprivileged) on port 4450
 set -euo pipefail
 
-D=/tmp/macsh-it
-SFTP_USER=macshit
+D=/tmp/rmount-it
+SFTP_USER=rmountit
 PASS="$(openssl rand -hex 12)"
 rm -rf "$D"; mkdir -p "$D"; chmod 755 "$D"
 command -v rclone >/dev/null || brew install rclone
@@ -18,7 +18,7 @@ echo "::add-mask::$PASS"
 
 # ---- SFTP ---------------------------------------------------------------------------
 # asyncssh server (password + public-key auth): macOS PAM rejects throwaway OS users.
-SFTP_USER=macshit
+SFTP_USER=rmountit
 mkdir -p "$D/sftp-data"
 ssh-keygen -q -t ed25519 -N "" -f "$D/id_ed25519"
 cp "$D/id_ed25519.pub" "$D/authorized_keys"
@@ -28,37 +28,37 @@ python3 -m venv "$D/venv"
 nohup "$D/venv/bin/python" "$(dirname "$0")/sftp_server.py" 2222 "$SFTP_USER" "$PASS" \
   "$D/host_key" "$D/authorized_keys" > "$D/sshd.log" 2>&1 &
 for _ in $(seq 1 20); do nc -z 127.0.0.1 2222 && break; sleep 0.5; done
-# Prove both auth methods work before the tests blame macsh.
+# Prove both auth methods work before the tests blame rmount.
 printf 'ls %s\n' "$D/sftp-data" > "$D/batch"
 sftp -P 2222 -i "$D/id_ed25519" -b "$D/batch" -o BatchMode=yes -o StrictHostKeyChecking=no \
   -o UserKnownHostsFile=/dev/null "$SFTP_USER@127.0.0.1" || { cat "$D/sshd.log"; exit 1; }
-export_env MACSH_IT_SFTP_PORT 2222
-export_env MACSH_IT_SFTP_USER "$SFTP_USER"
-export_env MACSH_IT_SFTP_PASS "$PASS"
-export_env MACSH_IT_SFTP_KEY "$D/id_ed25519"
-export_env MACSH_IT_SFTP_AUTHKEYS "$D/authorized_keys"
-export_env MACSH_IT_SFTP_DIR "$D/sftp-data"
+export_env RMOUNT_IT_SFTP_PORT 2222
+export_env RMOUNT_IT_SFTP_USER "$SFTP_USER"
+export_env RMOUNT_IT_SFTP_PASS "$PASS"
+export_env RMOUNT_IT_SFTP_KEY "$D/id_ed25519"
+export_env RMOUNT_IT_SFTP_AUTHKEYS "$D/authorized_keys"
+export_env RMOUNT_IT_SFTP_DIR "$D/sftp-data"
 
 # ---- FTP ----------------------------------------------------------------------------
 mkdir -p "$D/ftp-data"
-nohup "$D/venv/bin/python" "$(dirname "$0")/ftp_server.py" 2121 macsh "$PASS" "$D/ftp-data" \
+nohup "$D/venv/bin/python" "$(dirname "$0")/ftp_server.py" 2121 rmount "$PASS" "$D/ftp-data" \
   > "$D/ftp.log" 2>&1 &
 for _ in $(seq 1 20); do nc -z 127.0.0.1 2121 && break; sleep 0.5; done
-export_env MACSH_IT_FTP_PORT 2121
-export_env MACSH_IT_FTP_USER macsh
-export_env MACSH_IT_FTP_PASS "$PASS"
-export_env MACSH_IT_FTP_DIR "$D/ftp-data"
+export_env RMOUNT_IT_FTP_PORT 2121
+export_env RMOUNT_IT_FTP_USER rmount
+export_env RMOUNT_IT_FTP_PASS "$PASS"
+export_env RMOUNT_IT_FTP_DIR "$D/ftp-data"
 
 # ---- S3 -----------------------------------------------------------------------------
 mkdir -p "$D/s3-data/bkt"
-nohup rclone serve s3 "$D/s3-data" --addr 127.0.0.1:9000 --auth-key "macshak,$PASS" \
+nohup rclone serve s3 "$D/s3-data" --addr 127.0.0.1:9000 --auth-key "rmountak,$PASS" \
   > "$D/s3.log" 2>&1 &
 for _ in $(seq 1 20); do nc -z 127.0.0.1 9000 && break; sleep 0.5; done
-export_env MACSH_IT_S3_ENDPOINT http://127.0.0.1:9000
-export_env MACSH_IT_S3_ACCESS macshak
-export_env MACSH_IT_S3_SECRET "$PASS"
-export_env MACSH_IT_S3_BUCKET bkt
-export_env MACSH_IT_S3_DIR "$D/s3-data"
+export_env RMOUNT_IT_S3_ENDPOINT http://127.0.0.1:9000
+export_env RMOUNT_IT_S3_ACCESS rmountak
+export_env RMOUNT_IT_S3_SECRET "$PASS"
+export_env RMOUNT_IT_S3_BUCKET bkt
+export_env RMOUNT_IT_S3_DIR "$D/s3-data"
 # ---- SMB ----------------------------------------------------------------------------
 # Samba (real SMB server) running unprivileged as the current user on port 4450.
 brew list samba >/dev/null 2>&1 || brew install samba
@@ -87,7 +87,7 @@ cat > "$D/samba/smb.conf" <<CFG
   disable spoolss = yes
   printcap name = /dev/null
   printing = bsd
-[macshshare]
+[rmountshare]
   path = $D/smb-data
   read only = no
   valid users = $SMB_USER
@@ -99,9 +99,9 @@ sudo chown -R "$SMB_USER" "$D/samba"
 nohup "$SAMBA_PREFIX/sbin/samba-dot-org-smbd" --foreground --no-process-group -s "$D/samba/smb.conf" > "$D/smb.log" 2>&1 &
 for _ in $(seq 1 30); do nc -z 127.0.0.1 4450 && break; sleep 0.5; done
 nc -z 127.0.0.1 4450 || { echo "Samba did not start"; cat "$D/smb.log"; tail -n 30 "$D"/samba/log.* 2>/dev/null; exit 1; }
-export_env MACSH_IT_SMB_PORT 4450
-export_env MACSH_IT_SMB_USER "$SMB_USER"
-export_env MACSH_IT_SMB_PASS "$PASS"
-export_env MACSH_IT_SMB_SHARE macshshare
-export_env MACSH_IT_SMB_DIR "$D/smb-data"
+export_env RMOUNT_IT_SMB_PORT 4450
+export_env RMOUNT_IT_SMB_USER "$SMB_USER"
+export_env RMOUNT_IT_SMB_PASS "$PASS"
+export_env RMOUNT_IT_SMB_SHARE rmountshare
+export_env RMOUNT_IT_SMB_DIR "$D/smb-data"
 echo "backends up"

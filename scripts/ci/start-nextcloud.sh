@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs and starts a real Nextcloud (PHP built-in server + SQLite) on a macOS CI runner.
 # Docker/Podman cannot run on Apple Silicon runners (no nested virtualization), so this
-# runs Nextcloud natively. Exports MACSH_IT_* variables to $GITHUB_ENV when set.
+# runs Nextcloud natively. Exports RMOUNT_IT_* variables to $GITHUB_ENV when set.
 set -euo pipefail
 
 PORT="${NEXTCLOUD_PORT:-8080}"
@@ -33,15 +33,15 @@ done
 curl -fsS "http://127.0.0.1:$PORT/status.php"
 echo
 
-# The same URL a user would enter in macsh, and a sanity check that WebDAV auth works.
+# The same URL a user would enter in rmount, and a sanity check that WebDAV auth works.
 URL="http://127.0.0.1:$PORT/remote.php/dav/files/$ADMIN_USER/"
 curl -fsS -o /dev/null -X PROPFIND -H "Depth: 0" -u "$ADMIN_USER:$ADMIN_PASS" "$URL"
 
 if [ -n "${GITHUB_ENV:-}" ]; then
   {
-    echo "MACSH_IT_NEXTCLOUD_URL=$URL"
-    echo "MACSH_IT_NEXTCLOUD_USER=$ADMIN_USER"
-    echo "MACSH_IT_NEXTCLOUD_PASS=$ADMIN_PASS"
+    echo "RMOUNT_IT_NEXTCLOUD_URL=$URL"
+    echo "RMOUNT_IT_NEXTCLOUD_USER=$ADMIN_USER"
+    echo "RMOUNT_IT_NEXTCLOUD_PASS=$ADMIN_PASS"
   } >> "$GITHUB_ENV"
   echo "::add-mask::$ADMIN_PASS"
 fi

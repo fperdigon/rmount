@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Checks release DMGs the way a user's Mac will treat them, without launching the app.
 #
-#   scripts/verify-dmg.sh dist/macsh-0.1.3.dmg [dist/macsh-lite-0.1.3.dmg ...]
+#   scripts/verify-dmg.sh dist/rmount-0.1.3.dmg [dist/rmount-lite-0.1.3.dmg ...]
 #
 # Per DMG: image checksum, drag-to-install layout, Info.plist, architecture, a valid code
-# signature on the whole bundle, the bundled rclone (macsh only), and what Gatekeeper says
+# signature on the whole bundle, the bundled rclone (rmount only), and what Gatekeeper says
 # about the app after a simulated download (quarantine flag). Exit status is non-zero if
 # anything is wrong. "Rejected" by Gatekeeper is expected for apps without a Developer ID;
-# "cannot assess" is not: that is what users see as "macsh is damaged and can't be opened".
+# "cannot assess" is not: that is what users see as "rmount is damaged and can't be opened".
 set -uo pipefail
 
 [ $# -ge 1 ] || { echo "usage: $0 file.dmg [file.dmg ...]" >&2; exit 2; }
@@ -52,7 +52,7 @@ verify_one() {
     fi
 
     case "$name" in
-        macsh-lite) [ -e "$app/Contents/Resources/rclone" ] && note "lite flavour contains rclone (unexpected)" || pass "lite flavour: no bundled rclone, as intended" ;;
+        rmount-lite) [ -e "$app/Contents/Resources/rclone" ] && note "lite flavour contains rclone (unexpected)" || pass "lite flavour: no bundled rclone, as intended" ;;
         *)
             local rc="$app/Contents/Resources/rclone"
             if [ -x "$rc" ] && lipo -archs "$rc" 2>/dev/null | grep -qw arm64 && "$rc" version >/dev/null 2>&1; then

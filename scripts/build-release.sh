@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Builds release-grade unsigned macsh.app and macsh-lite.app, then wraps
+# Builds release-grade unsigned rmount.app and rmount-lite.app, then wraps
 # each in a DMG suitable for uploading to a GitHub Release.
 #
-# Output: dist/macsh-<version>.dmg, dist/macsh-lite-<version>.dmg
+# Output: dist/rmount-<version>.dmg, dist/rmount-lite-<version>.dmg
 #
 # The apps are ad-hoc signed (sealed) but not notarized, so on first launch users right-click >
 # Open (or System Settings > Privacy & Security > Open Anyway), or clear the quarantine flag:
-#   xattr -dr com.apple.quarantine /Applications/macsh.app
+#   xattr -dr com.apple.quarantine /Applications/rmount.app
 # (See README "Install" section.)
 
 set -euo pipefail
@@ -24,10 +24,10 @@ fi
 
 # Version comes from the bundled-variant Info.plist. Bump CFBundleShortVersionString
 # in both Info.plist files in lockstep before tagging a release.
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' App/macsh/Resources/Info.plist)"
-echo "Building macsh and macsh-lite v${VERSION} ..."
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' App/rmount/Resources/Info.plist)"
+echo "Building rmount and rmount-lite v${VERSION} ..."
 
-# Step 1: bundled rclone (only consumed by the `macsh` target; harmless for `macsh-lite`).
+# Step 1: bundled rclone (only consumed by the `rmount` target; harmless for `rmount-lite`).
 ./scripts/fetch-rclone.sh
 
 # Step 2: regenerate the Xcode project from project.yml.
@@ -45,14 +45,14 @@ build_target() {
     local scheme="$1"
     echo "==> xcodebuild ${scheme} (Release)"
     xcodebuild \
-        -project App/macsh.xcodeproj \
+        -project App/rmount.xcodeproj \
         -scheme "$scheme" \
         -configuration Release \
         -derivedDataPath "$BUILD_DIR" \
         CODE_SIGNING_ALLOWED=NO \
         CODE_SIGN_IDENTITY="" \
         CODE_SIGNING_REQUIRED=NO \
-        MACSH_BUILD_SHA="$BUILD_SHA" \
+        RMOUNT_BUILD_SHA="$BUILD_SHA" \
         build \
         | grep -E '(error:|warning:.*deprecated|BUILD SUCCEEDED|BUILD FAILED)' \
         || true
@@ -65,12 +65,12 @@ build_target() {
 # xcodebuild runs with signing disabled, which leaves only the linker's ad-hoc stamp on the
 # executable. That does not seal the bundle's resources (Info.plist, bundled rclone, icons), so
 # on Apple Silicon a downloaded copy fails Gatekeeper's integrity check and macOS says
-# "macsh is damaged and can't be opened". Seal the whole bundle with an ad-hoc signature
+# "rmount is damaged and can't be opened". Seal the whole bundle with an ad-hoc signature
 # (no Apple account needed); users then get the normal "unidentified developer" prompt.
 seal_app() {
     local app_path="$1"
     echo "==> codesign (ad-hoc) $app_path"
-    codesign --force --deep --sign - --entitlements App/macsh/Resources/macsh.entitlements "$app_path"
+    codesign --force --deep --sign - --entitlements App/rmount/Resources/rmount.entitlements "$app_path"
     codesign --verify --deep --strict "$app_path"
 }
 
@@ -106,15 +106,15 @@ make_dmg() {
         "$dmg_path" >/dev/null
 }
 
-build_target "macsh"
-build_target "macsh-lite"
+build_target "rmount"
+build_target "rmount-lite"
 
-make_dmg "macsh"
-make_dmg "macsh-lite"
+make_dmg "rmount"
+make_dmg "rmount-lite"
 
 echo
 echo "==> verifying the DMGs"
-./scripts/verify-dmg.sh "$DIST/macsh-${VERSION}.dmg" "$DIST/macsh-lite-${VERSION}.dmg"
+./scripts/verify-dmg.sh "$DIST/rmount-${VERSION}.dmg" "$DIST/rmount-lite-${VERSION}.dmg"
 
 echo
 echo "Done. Outputs:"

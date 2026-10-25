@@ -23,7 +23,7 @@ class VerifyDmgTests(unittest.TestCase):
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="verify-dmg-test."))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
-    def make_app(self, root, name="macsh-lite", seal=False):
+    def make_app(self, root, name="rmount-lite", seal=False):
         app = root / f"{name}.app"
         (app / "Contents/MacOS").mkdir(parents=True)
         (app / "Contents/Resources").mkdir()
@@ -39,7 +39,7 @@ class VerifyDmgTests(unittest.TestCase):
             subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app)], check=True, capture_output=True)
         return app
 
-    def make_dmg(self, name="macsh-lite", seal=False, applications_link=True):
+    def make_dmg(self, name="rmount-lite", seal=False, applications_link=True):
         stage = self.tmp / f"stage-{name}-{seal}-{applications_link}"
         stage.mkdir()
         self.make_app(stage, name, seal)

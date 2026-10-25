@@ -1,0 +1,11 @@
+RMount
+Copyright 2026 Ayon Pal and RMount contributors
+
+This product is a fork of macsh (https://github.com/AyonPal/macsh), created by
+Ayon Pal and licensed under the Apache License, Version 2.0. The original
+copyright and license are retained in the LICENSE file. Files changed since the
+fork carry the modifications of the RMount contributors listed in
+CONTRIBUTORS.md; the full change history is in the git log.
+
+The full flavour of RMount bundles the rclone binary (https://rclone.org),
+Copyright the rclone authors, licensed under the MIT License.

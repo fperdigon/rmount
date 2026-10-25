@@ -6,6 +6,18 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Renamed from macsh to RMount.** The app is now `rmount.app` / `rmount-lite.app`, the DMGs are
+  `rmount-<version>.dmg` / `rmount-lite-<version>.dmg`, the repository is `fperdigon/rmount`, the Swift
+  module is `RMountCore`, and NFS mounts live in `~/rmount/<name>`. Credit to the original author is in
+  the README, `NOTICE` and `CONTRIBUTORS.md`.
+- **Stored data is untouched.** The bundle identifiers (`ai.macsh`, `ai.macsh.lite`) and the
+  `macsh.*` preference keys are kept on purpose, so remotes, Keychain items and settings carry over.
+- **Upgrading from macsh:** the old in-app updater looks for `macsh-*.dmg` assets and cannot find
+  `rmount-*` ones, so install RMount once by hand from the release page and delete the old app.
+  Updates work normally from then on.
+
 ## [0.1.4] — 2026-10-17
 
 ### Added
