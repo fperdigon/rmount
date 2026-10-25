@@ -27,7 +27,7 @@ final class UserPreferencesTests: XCTestCase {
     }
 
     func testInvalidStoredProtocolFallsBack() {
-        defaults.set("bogus", forKey: "macsh.defaultProtocol")
+        defaults.set("bogus", forKey: "rmount.defaultProtocol")
         XCTAssertEqual(UserPreferences(defaults: defaults).defaultProtocol, .webdav)
     }
 

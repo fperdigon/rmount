@@ -24,11 +24,16 @@ public class Mounter {
     }
 
     private let mountBase: URL
+    let legacyMountBases: [URL]
 
     /// `mountBase` is where NFS mountpoints are created; defaults to `~/rmount`.
-    public init(mountBase: URL? = nil) {
-        self.mountBase = mountBase
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("rmount", isDirectory: true)
+    /// `legacyMountBases` are old locations (`~/macsh`) that are never mounted into but are still
+    /// searched for leftover mounts of a previous run; by default only when `mountBase` is too.
+    public init(mountBase: URL? = nil, legacyMountBases: [URL]? = nil) {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        self.mountBase = mountBase ?? home.appendingPathComponent("rmount", isDirectory: true)
+        self.legacyMountBases = legacyMountBases
+            ?? (mountBase == nil ? [home.appendingPathComponent(LegacyNames.mountDirectoryName, isDirectory: true)] : [])
     }
 
     /// Strips characters that can't appear in a macOS volume name (`/`, `:`, NULs)
@@ -177,11 +182,12 @@ public class Mounter {
 
     /// Mounts currently on this machine that look like ours (see `parseLocalMounts`).
     public func currentLocalMounts() -> [LocalMount] {
-        Self.parseLocalMounts(
-            mountOutput: Self.output(of: "/sbin/mount", []),
-            nfsstatOutput: Self.output(of: "/usr/bin/nfsstat", ["-m"]),
-            mountBase: mountBase.path
-        )
+        let mountOutput = Self.output(of: "/sbin/mount", [])
+        let nfsstatOutput = Self.output(of: "/usr/bin/nfsstat", ["-m"])
+        var seen = Set<String>()
+        return ([mountBase] + legacyMountBases).flatMap {
+            Self.parseLocalMounts(mountOutput: mountOutput, nfsstatOutput: nfsstatOutput, mountBase: $0.path)
+        }.filter { seen.insert($0.path).inserted }
     }
 
     /// At launch nothing is mounted by *this* process, so any NFS mount of a local rclone

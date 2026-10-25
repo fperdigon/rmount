@@ -4,16 +4,51 @@ import Foundation
 public final class UserPreferences {
     private let defaults: UserDefaults
 
-    public init(defaults: UserDefaults = .standard) {
+    /// `legacyDomains` are the preference domains of the old bundle ids (`ai.macsh`). Values the
+    /// user set there, under the old `macsh.*` key names, are copied once to the `rmount.*` keys;
+    /// the old values stay where they are, so an older version keeps working.
+    public init(defaults: UserDefaults = .standard, legacyDomains: [String] = []) {
         self.defaults = defaults
+        migrateLegacyValues(from: legacyDomains)
     }
 
-    private static let defaultProtocolKey = "macsh.defaultProtocol"
-    private static let customRclonePathKey = "macsh.customRclonePath"
-    private static let updateChannelKey = "macsh.updateChannel"
-    private static let autoCheckUpdatesKey = "macsh.autoCheckUpdates"
-    private static let lastUpdateCheckKey = "macsh.lastUpdateCheck"
-    private static let skippedUpdateTagKey = "macsh.skippedUpdateTag"
+    private static let defaultProtocolName = "defaultProtocol"
+    private static let customRclonePathName = "customRclonePath"
+    private static let updateChannelName = "updateChannel"
+    private static let autoCheckUpdatesName = "autoCheckUpdates"
+    private static let lastUpdateCheckName = "lastUpdateCheck"
+    private static let skippedUpdateTagName = "skippedUpdateTag"
+    private static let allNames = [
+        defaultProtocolName, customRclonePathName, updateChannelName,
+        autoCheckUpdatesName, lastUpdateCheckName, skippedUpdateTagName,
+    ]
+    private static let migratedKey = LegacyNames.currentPreferenceKeyPrefix + "legacyPreferencesMigrated"
+
+    private static func key(_ name: String) -> String { LegacyNames.currentPreferenceKeyPrefix + name }
+    private static var defaultProtocolKey: String { key(defaultProtocolName) }
+    private static var customRclonePathKey: String { key(customRclonePathName) }
+    private static var updateChannelKey: String { key(updateChannelName) }
+    private static var autoCheckUpdatesKey: String { key(autoCheckUpdatesName) }
+    private static var lastUpdateCheckKey: String { key(lastUpdateCheckName) }
+    private static var skippedUpdateTagKey: String { key(skippedUpdateTagName) }
+
+    private func migrateLegacyValues(from legacyDomains: [String]) {
+        guard defaults.object(forKey: Self.migratedKey) == nil else { return }
+        for name in Self.allNames {
+            let new = Self.key(name)
+            guard defaults.object(forKey: new) == nil else { continue }
+            let old = LegacyNames.preferenceKeyPrefix + name
+            var value = defaults.object(forKey: old)
+            if value == nil {
+                for domain in legacyDomains {
+                    value = defaults.persistentDomain(forName: domain)?[old]
+                    if value != nil { break }
+                }
+            }
+            if let value { defaults.set(value, forKey: new) }
+        }
+        defaults.set(true, forKey: Self.migratedKey)
+    }
 
     public var defaultProtocol: MountProtocol {
         get {

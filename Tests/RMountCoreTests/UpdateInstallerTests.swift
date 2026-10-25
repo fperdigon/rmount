@@ -113,6 +113,42 @@ final class UpdateInstallerTests: XCTestCase {
         XCTAssertTrue(leftovers.isEmpty, "staging folder removed: \(leftovers)")
     }
 
+    func testInstallOverOldNamedAppMovesToTheNewName() throws {
+        let dir = try tempDir()
+        let installed = try makeApp(named: "macsh.app", in: dir, marker: "OLD-VERSION")
+        let src = try makeApp(named: "rmount.app", in: try tempDir(), marker: "NEW-VERSION")
+        let dmg = try makeDMG(containing: src, in: dir)
+
+        let result = try UpdateInstaller.install(dmg: dmg, expectedDigest: nil, over: installed)
+
+        XCTAssertEqual(result.lastPathComponent, "rmount.app")
+        XCTAssertEqual(try marker(of: result), "NEW-VERSION")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: installed.path), "the old bundle is moved away")
+    }
+
+    func testInstallOverOldNamedAppReplacesAnExistingNewNamedApp() throws {
+        let dir = try tempDir()
+        let installed = try makeApp(named: "macsh.app", in: dir, marker: "OLD-VERSION")
+        try makeApp(named: "rmount.app", in: dir, marker: "STALE")
+        let src = try makeApp(named: "rmount.app", in: try tempDir(), marker: "NEW-VERSION")
+        let dmg = try makeDMG(containing: src, in: dir)
+
+        let result = try UpdateInstaller.install(dmg: dmg, expectedDigest: nil, over: installed)
+
+        XCTAssertEqual(try marker(of: result), "NEW-VERSION")
+    }
+
+    func testAppNameInMountedDMG() throws {
+        let dir = try tempDir()
+        try makeApp(named: "rmount.app", in: dir, marker: "x")
+        try makeApp(named: "rmount-lite.app", in: dir, marker: "y")
+        XCTAssertEqual(UpdateInstaller.appName(inMountedDMG: dir, matching: "rmount.app"), "rmount.app")
+        XCTAssertEqual(UpdateInstaller.appName(inMountedDMG: dir, matching: "macsh.app"), "rmount.app")
+        XCTAssertEqual(UpdateInstaller.appName(inMountedDMG: dir, matching: "macsh-lite.app"), "rmount-lite.app")
+        XCTAssertEqual(UpdateInstaller.appName(inMountedDMG: dir, matching: "Other.app"), "Other.app",
+                       "an unrelated app name is never swapped for another app")
+    }
+
     func testInstallRejectsBadChecksumBeforeTouchingTheApp() throws {
         let dir = try tempDir()
         let installed = try makeApp(named: "rmount.app", in: dir, marker: "OLD-VERSION")

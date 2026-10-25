@@ -106,15 +106,38 @@ make_dmg() {
         "$dmg_path" >/dev/null
 }
 
+# Transition aid, remove with the legacy aliases (see AGENTS.md): installed copies of macsh look
+# for `macsh-<version>.dmg` holding `macsh.app` when they update themselves. Publish the same
+# (already sealed) build under those names so they upgrade in place to RMount. The new app
+# renames itself to rmount.app on its next update.
+make_legacy_dmg() {
+    local scheme="$1" legacy="$2"
+    local app_path="$PRODUCTS/$scheme.app"
+    local dmg_path="$DIST/${legacy}-${VERSION}.dmg"
+    rm -f "$dmg_path"
+    local stage
+    stage="$(mktemp -d)"
+    trap 'rm -rf "$stage"' RETURN
+    cp -R "$app_path" "$stage/$legacy.app"
+    ln -s /Applications "$stage/Applications"
+    local size_mb
+    size_mb="$(( $(du -sk "$stage/$legacy.app" | cut -f1) / 1024 + 64 ))"
+    echo "==> hdiutil create $dmg_path (legacy alias of $scheme)"
+    hdiutil create -volname "$legacy" -srcfolder "$stage" -ov -fs HFS+ -size "${size_mb}m" -format UDZO "$dmg_path" >/dev/null
+}
+
 build_target "rmount"
 build_target "rmount-lite"
 
 make_dmg "rmount"
 make_dmg "rmount-lite"
+make_legacy_dmg "rmount" "macsh"
+make_legacy_dmg "rmount-lite" "macsh-lite"
 
 echo
 echo "==> verifying the DMGs"
-./scripts/verify-dmg.sh "$DIST/rmount-${VERSION}.dmg" "$DIST/rmount-lite-${VERSION}.dmg"
+./scripts/verify-dmg.sh "$DIST/rmount-${VERSION}.dmg" "$DIST/rmount-lite-${VERSION}.dmg" \
+    "$DIST/macsh-${VERSION}.dmg" "$DIST/macsh-lite-${VERSION}.dmg"
 
 echo
 echo "Done. Outputs:"

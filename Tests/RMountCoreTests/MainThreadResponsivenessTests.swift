@@ -8,7 +8,7 @@ import XCTest
 final class MainThreadResponsivenessTests: XCTestCase {
     private var dir: URL!
     private let id = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
-    private let keychain = KeychainService(serviceName: "ai.macsh.test")
+    private let keychain = KeychainService(serviceName: "ai.rmount.test")
 
     override func setUpWithError() throws {
         dir = FileManager.default.temporaryDirectory

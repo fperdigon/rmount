@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class StoredKeyFilePathTests: XCTestCase {
-    private let keychain = KeychainService(serviceName: "ai.macsh.test")
+    private let keychain = KeychainService(serviceName: "ai.rmount.test")
     private let id = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
     private var dir: URL!
 

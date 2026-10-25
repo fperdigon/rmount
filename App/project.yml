@@ -44,7 +44,7 @@ targets:
         type: file
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: ai.macsh
+        PRODUCT_BUNDLE_IDENTIFIER: ai.rmount
         PRODUCT_NAME: rmount
         INFOPLIST_FILE: rmount/Resources/Info.plist
         GENERATE_INFOPLIST_FILE: NO
@@ -73,7 +73,7 @@ targets:
         type: file
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: ai.macsh.lite
+        PRODUCT_BUNDLE_IDENTIFIER: ai.rmount.lite
         PRODUCT_NAME: rmount-lite
         INFOPLIST_FILE: rmount/Resources/Info-Lite.plist
         GENERATE_INFOPLIST_FILE: NO

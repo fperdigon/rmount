@@ -29,12 +29,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             signalSources.append(src)
         }
         do {
-            let bundleID = Bundle.main.bundleIdentifier ?? "ai.macsh"
-            let supportDir = try AppPaths.applicationSupport(bundleID: bundleID)
+            let bundleID = Bundle.main.bundleIdentifier ?? "ai.rmount"
+            // Aliases of the names used while the app was called macsh: data under the old
+            // bundle id is carried over on first launch, and the old names stay readable.
+            let legacyIDs = LegacyNames.legacyBundleIDs(for: bundleID)
+            let supportDir = try AppPaths.applicationSupport(bundleID: bundleID, legacyBundleIDs: legacyIDs)
             let store = RemoteStore(directory: supportDir)
-            let keychain = KeychainService(serviceName: bundleID)
+            let keychain = KeychainService(serviceName: bundleID, legacyServiceNames: legacyIDs)
             let mounter = Mounter()
-            let prefs = UserPreferences()
+            let prefs = UserPreferences(legacyDomains: legacyIDs)
             let binary = try RcloneBinary.resolve(prefs: prefs)
             let knownHosts = supportDir.appendingPathComponent("known_hosts").path
             let prompter = HostKeyAlertPrompter()

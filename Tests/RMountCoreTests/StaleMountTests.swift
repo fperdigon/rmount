@@ -81,7 +81,7 @@ final class RcloneExitWatcherTests: XCTestCase {
             mountProtocol: .nfs, autoMount: autoMount
         )
         let manager = SessionManager(
-            store: RemoteStore(directory: dir), keychain: KeychainService(serviceName: "ai.macsh.test"),
+            store: RemoteStore(directory: dir), keychain: KeychainService(serviceName: "ai.rmount.test"),
             mounter: Mounter(mountBase: dir), logsDir: dir.appendingPathComponent("logs"),
             rcloneBinary: URL(fileURLWithPath: "/usr/bin/true"))
         return (manager, RemoteSession(remote: remote))

@@ -88,11 +88,11 @@ final class UpdateController {
             progressLabel?.stringValue = "Installing…"
             let app = Bundle.main.bundleURL
             let digest = update.asset.digest
-            try await Task.detached(priority: .userInitiated) {
+            let installed = try await Task.detached(priority: .userInitiated) {
                 try UpdateInstaller.install(dmg: dmg, expectedDigest: digest, over: app)
             }.value
             hideProgress()
-            try UpdateInstaller.relaunchProcess(appURL: app).run()
+            try UpdateInstaller.relaunchProcess(appURL: installed).run()
             NSApp.terminate(nil)
         } catch {
             hideProgress()

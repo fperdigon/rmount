@@ -23,15 +23,16 @@ class VerifyDmgTests(unittest.TestCase):
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="verify-dmg-test."))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
-    def make_app(self, root, name="rmount-lite", seal=False):
+    def make_app(self, root, name="rmount-lite", seal=False, exe=None):
+        exe = exe or name
         app = root / f"{name}.app"
         (app / "Contents/MacOS").mkdir(parents=True)
         (app / "Contents/Resources").mkdir()
         src = self.tmp / "main.c"
         src.write_text("int main(void){return 0;}\n")
-        subprocess.run(["cc", "-arch", "arm64", "-o", str(app / "Contents/MacOS" / name), str(src)], check=True)
+        subprocess.run(["cc", "-arch", "arm64", "-o", str(app / "Contents/MacOS" / exe), str(src)], check=True)
         with open(app / "Contents/Info.plist", "wb") as f:
-            plistlib.dump({"CFBundleIdentifier": f"test.{name}", "CFBundleExecutable": name,
+            plistlib.dump({"CFBundleIdentifier": f"test.{name}", "CFBundleExecutable": exe,
                            "CFBundleShortVersionString": "9.9.9", "CFBundleName": name,
                            "CFBundlePackageType": "APPL", "LSMinimumSystemVersion": "14.0"}, f)
         (app / "Contents/Resources/hello.txt").write_text("resource the signature must seal\n")
@@ -39,10 +40,10 @@ class VerifyDmgTests(unittest.TestCase):
             subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app)], check=True, capture_output=True)
         return app
 
-    def make_dmg(self, name="rmount-lite", seal=False, applications_link=True):
+    def make_dmg(self, name="rmount-lite", seal=False, applications_link=True, exe=None):
         stage = self.tmp / f"stage-{name}-{seal}-{applications_link}"
         stage.mkdir()
-        self.make_app(stage, name, seal)
+        self.make_app(stage, name, seal, exe)
         if applications_link:
             os.symlink("/Applications", stage / "Applications")
         dmg = self.tmp / f"{name}-9.9.9.dmg"
@@ -66,6 +67,13 @@ class VerifyDmgTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("code signature is valid for the whole bundle", out)
         self.assertIn("All checks passed", out)
+
+    def test_legacy_named_alias_app_passes(self):
+        # macsh-lite.app holds the rmount-lite executable: the folder name is not the executable name.
+        code, out = self.verify(self.make_dmg(name="macsh-lite", seal=True, exe="rmount-lite"))
+        self.assertEqual(code, 0, out)
+        self.assertIn("executable is arm64", out)
+        self.assertIn("lite flavour: no bundled rclone", out)
 
     def test_missing_applications_shortcut_fails(self):
         code, out = self.verify(self.make_dmg(seal=True, applications_link=False))

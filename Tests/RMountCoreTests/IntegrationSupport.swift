@@ -11,7 +11,11 @@ enum IntegrationEnv {
         let env = ProcessInfo.processInfo.environment
         var out: [String: String] = [:]
         for k in keys {
-            guard let v = env[k], !v.isEmpty else { throw XCTSkip("\(k) not set (integration server not running)") }
+            // The old MACSH_IT_* names still work for a local run.
+            let legacy = k.replacingOccurrences(of: "RMOUNT_", with: "MACSH_")
+            guard let v = [env[k], env[legacy]].compactMap({ $0 }).first(where: { !$0.isEmpty }) else {
+                throw XCTSkip("\(k) not set (integration server not running)")
+            }
             out[k] = v
         }
         return out

@@ -72,6 +72,12 @@ public enum UpdateInstaller {
 
     /// Opens the DMG, copies `<appName>` out of it into `directory` and unmounts it.
     public static func extractApp(fromDMG dmg: URL, appName: String, into directory: URL) throws -> URL {
+        try extractApp(fromDMG: dmg, into: directory) { _ in appName }
+    }
+
+    /// Like `extractApp(fromDMG:appName:into:)`, but `pick` chooses the app's name once the image
+    /// is mounted (it is given the mount point).
+    static func extractApp(fromDMG dmg: URL, into directory: URL, pick: (URL) -> String) throws -> URL {
         let mount = FileManager.default.temporaryDirectory.appendingPathComponent("rmount-update-mount-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
         let attach = run("/usr/bin/hdiutil", ["attach", dmg.path, "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mount.path])
@@ -83,6 +89,7 @@ public enum UpdateInstaller {
             _ = run("/usr/bin/hdiutil", ["detach", mount.path, "-force"])
             try? FileManager.default.removeItem(at: mount)
         }
+        let appName = pick(mount)
         let source = mount.appendingPathComponent(appName)
         guard FileManager.default.fileExists(atPath: source.path) else { throw InstallError.appNotFound(appName) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -106,18 +113,47 @@ public enum UpdateInstaller {
         }
     }
 
+    /// The app to take from a mounted update DMG: one named like the running app, otherwise, for a
+    /// running `macsh*.app` (the old name), the matching `rmount*.app` (`macsh.app` -> `rmount.app`,
+    /// `macsh-lite.app` -> `rmount-lite.app`).
+    static func appName(inMountedDMG mount: URL, matching current: String) -> String {
+        if FileManager.default.fileExists(atPath: mount.appendingPathComponent(current).path) { return current }
+        if current.hasPrefix(LegacyNames.assetPrefix) {
+            let renamed = "rmount" + current.dropFirst(LegacyNames.assetPrefix.count)
+            if FileManager.default.fileExists(atPath: mount.appendingPathComponent(renamed).path) { return renamed }
+        }
+        return current
+    }
+
     /// Verifies the DMG and installs the app it contains over `current`. The new copy is staged
     /// next to the old one so the swap never crosses volumes. Does not relaunch.
-    public static func install(dmg: URL, expectedDigest: String?, over current: URL) throws {
+    ///
+    /// Returns where the new app now is: `current`, or, when the DMG's app has another name
+    /// (macsh.app updated to rmount.app), a sibling with the new name, with the old bundle moved
+    /// to the Trash.
+    @discardableResult
+    public static func install(dmg: URL, expectedDigest: String?, over current: URL) throws -> URL {
         try verify(file: dmg, expected: expectedDigest)
         guard canReplace(current) else {
             throw InstallError.notWritable(current.deletingLastPathComponent().path)
         }
         let staging = current.deletingLastPathComponent().appendingPathComponent(".rmount-update-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: staging) }
-        let staged = try extractApp(fromDMG: dmg, appName: current.lastPathComponent, into: staging)
+        let staged = try extractApp(fromDMG: dmg, into: staging) { appName(inMountedDMG: $0, matching: current.lastPathComponent) }
         clearQuarantine(staged)
-        try replaceApp(at: current, with: staged)
+        guard staged.lastPathComponent != current.lastPathComponent else {
+            try replaceApp(at: current, with: staged)
+            return current
+        }
+        let target = current.deletingLastPathComponent().appendingPathComponent(staged.lastPathComponent)
+        if FileManager.default.fileExists(atPath: target.path) {
+            try replaceApp(at: target, with: staged)
+        } else {
+            do { try FileManager.default.moveItem(at: staged, to: target) }
+            catch { throw InstallError.replaceFailed(error.localizedDescription) }
+        }
+        try? FileManager.default.trashItem(at: current, resultingItemURL: nil)
+        return target
     }
 
     /// A detached process that waits for this app to quit, then opens the (new) app.

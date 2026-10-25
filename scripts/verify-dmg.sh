@@ -39,7 +39,9 @@ verify_one() {
     if [ -n "$bid" ] && [ -n "$ver" ]; then pass "Info.plist: $bid $ver"; else fail "Info.plist lacks bundle id or version"; fi
     case "$dmg" in *"-$ver.dmg") pass "DMG file name matches version $ver";; *) note "file name does not end in -$ver.dmg";; esac
 
-    local exe="$app/Contents/MacOS/$name"
+    # The folder name is not the executable name for a legacy-named alias (macsh.app holds `rmount`).
+    local exename; exename="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist" 2>/dev/null)"
+    local exe="$app/Contents/MacOS/${exename:-$name}"
     if [ -x "$exe" ] && lipo -archs "$exe" 2>/dev/null | grep -qw arm64; then pass "executable is arm64"; else fail "missing or non-arm64 executable"; fi
     local minos; minos="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist" 2>/dev/null || true)"
     [ -n "$minos" ] && note "requires macOS $minos or later"
@@ -51,7 +53,7 @@ verify_one() {
         fail "invalid code signature: ${sig##*: }  (users get 'damaged and can't be opened')"
     fi
 
-    case "$name" in
+    case "${exename:-$name}" in
         rmount-lite) [ -e "$app/Contents/Resources/rclone" ] && note "lite flavour contains rclone (unexpected)" || pass "lite flavour: no bundled rclone, as intended" ;;
         *)
             local rc="$app/Contents/Resources/rclone"

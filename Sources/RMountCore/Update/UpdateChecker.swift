@@ -92,13 +92,18 @@ public struct UpdateChecker {
         return "Nightly \(d.prefix(4))-\(d.dropFirst(4).prefix(2))-\(d.suffix(2)) (\(sha.prefix(7)))"
     }
 
-    /// The DMG for this flavor: `rmount-lite-*.dmg` for lite, `rmount-*.dmg` otherwise.
+    /// The DMG for this flavor: `rmount-lite-*.dmg` for lite, `rmount-*.dmg` otherwise. A release
+    /// that only has the old `macsh-*` names is accepted too, and the new names win when both exist.
     public static func selectAsset(_ assets: [ReleaseAsset], lite: Bool) -> ReleaseAsset? {
-        assets.first { asset in
-            guard asset.name.hasSuffix(".dmg") else { return false }
-            return lite ? asset.name.hasPrefix("rmount-lite")
-                        : (asset.name.hasPrefix("rmount-") && !asset.name.hasPrefix("rmount-lite"))
+        for name in ["rmount", LegacyNames.assetPrefix] {
+            let found = assets.first { asset in
+                guard asset.name.hasSuffix(".dmg") else { return false }
+                return lite ? asset.name.hasPrefix("\(name)-lite")
+                            : (asset.name.hasPrefix("\(name)-") && !asset.name.hasPrefix("\(name)-lite"))
+            }
+            if let found { return found }
         }
+        return nil
     }
 
     private func makeUpdate(_ release: ReleaseInfo, channel: UpdateChannel, label: String, build: BuildInfo) throws -> AvailableUpdate {

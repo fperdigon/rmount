@@ -27,19 +27,24 @@ public enum KeychainError: Error, Equatable {
 
 public final class KeychainService {
     private let serviceName: String
+    private let legacyServiceNames: [String]
 
-    public init(serviceName: String) {
+    /// `legacyServiceNames` are old Keychain service names (the macsh bundle id). A secret found
+    /// only under one of them is returned and copied to `serviceName`; writes go to
+    /// `serviceName` only, and the old items are never touched except by `delete`.
+    public init(serviceName: String, legacyServiceNames: [String] = []) {
         self.serviceName = serviceName
+        self.legacyServiceNames = legacyServiceNames
     }
 
     private func account(_ id: UUID, _ kind: SecretKind) -> String {
         "\(id.uuidString):\(kind.rawValue)"
     }
 
-    private func baseQuery(_ id: UUID, _ kind: SecretKind) -> [String: Any] {
+    private func baseQuery(_ id: UUID, _ kind: SecretKind, service: String? = nil) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
+            kSecAttrService as String: service ?? serviceName,
             kSecAttrAccount as String: account(id, kind),
         ]
     }
@@ -62,7 +67,19 @@ public final class KeychainService {
     }
 
     public func get(remoteID: UUID, kind: SecretKind) throws -> String? {
-        var query = baseQuery(remoteID, kind)
+        if let value = try read(remoteID, kind, service: serviceName) { return value }
+        for legacy in legacyServiceNames {
+            // A legacy item the user cannot or will not unlock is simply not found.
+            if let value = (try? read(remoteID, kind, service: legacy)) ?? nil {
+                try? set(remoteID: remoteID, kind: kind, value: value)
+                return value
+            }
+        }
+        return nil
+    }
+
+    private func read(_ remoteID: UUID, _ kind: SecretKind, service: String) throws -> String? {
+        var query = baseQuery(remoteID, kind, service: service)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
@@ -75,10 +92,13 @@ public final class KeychainService {
         return str
     }
 
+    /// Removes the secret under the current name and every legacy name, so a deleted remote
+    /// cannot come back through the alias.
     public func delete(remoteID: UUID, kind: SecretKind) throws {
-        let query = baseQuery(remoteID, kind)
-        let status = SecItemDelete(query as CFDictionary)
-        if status == errSecSuccess || status == errSecItemNotFound { return }
-        throw KeychainError.osStatus(status)
+        for service in [serviceName] + legacyServiceNames {
+            let status = SecItemDelete(baseQuery(remoteID, kind, service: service) as CFDictionary)
+            if status == errSecSuccess || status == errSecItemNotFound { continue }
+            throw KeychainError.osStatus(status)
+        }
     }
 }

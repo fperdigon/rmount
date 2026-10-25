@@ -71,7 +71,7 @@ environment without macOS, open a PR and let CI be the judge.
 - New backends are declared as data: add a `BackendDescriptor` (fields, which are secret)
   rather than another `Backend` case plus `switch` arms. See `BackendDescriptor.webdav`.
 - Existing `remotes.json` files and Keychain items must keep working: decode tolerantly and
-  do not rename stored keys.
+  do not rename stored keys without an alias (see "Legacy aliases").
 - Match the surrounding style, naming and comment density.
 
 ## Testing rules
@@ -111,3 +111,23 @@ environment without macOS, open a PR and let CI be the judge.
 - Don't weaken host-key verification or certificate checks to make a test pass.
 - Don't push tags or release from automation without the maintainer asking.
 - Don't commit secrets, signing material or `.build/`.
+
+## Legacy aliases (from the macsh name)
+
+The app used to be called macsh. Every old name is still readable as an alias of the new one, in
+one place, `Sources/RMountCore/Compat/LegacyNames.swift`. Aliases only read; nothing writes under an
+old name, so an older version keeps working side by side.
+
+| Old name | New name | Alias behaviour |
+| --- | --- | --- |
+| bundle ids `ai.macsh`, `ai.macsh.lite` | `ai.rmount`, `ai.rmount.lite` | `AppPaths` copies the old Application Support folder once; `KeychainService` falls back to the old service and copies the secret forward; `UserPreferences` copies the old domain's values |
+| preference keys `macsh.*` | `rmount.*` | copied once per install (`rmount.legacyPreferencesMigrated`) |
+| `~/macsh/<name>` NFS mounts | `~/rmount/<name>` | `Mounter` still looks there for leftover mounts |
+| release assets `macsh-*.dmg` | `rmount-*.dmg` | `UpdateChecker.selectAsset` prefers new, accepts old; `build-release.sh` also builds `macsh-*.dmg` holding `macsh.app` so old updaters can upgrade; `UpdateInstaller.install` moves `macsh.app` to `rmount.app` |
+| Info.plist key `MacshBuildSHA` | `RMountBuildSHA` | `BuildInfo` falls back to the old key |
+| CI secrets `MACSH_IT_*` | `RMOUNT_IT_*` | workflow uses `RMOUNT_IT_* \|\| MACSH_IT_*`; `IntegrationEnv.require` accepts both |
+
+**Removal:** drop the aliases (delete `LegacyNames.swift` and each use, the `make_legacy_dmg` step and
+its verify call, the `MACSH_IT_*` fallbacks) in the first release that is at least six months after
+the first RMount release, or earlier once no install of macsh can still be updating. Do it in one PR,
+and add a CHANGELOG line that old data is no longer migrated.

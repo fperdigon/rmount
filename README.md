@@ -93,6 +93,12 @@ Launch the app. A small icon appears in your menu bar; click it to add your firs
 
 Pick one. They can coexist if you want both.
 
+### Coming from macsh?
+
+Install RMount normally, or just update macsh from inside the app: it upgrades in place to RMount.
+Your remotes, passwords and settings are carried over automatically, and the old data is left
+untouched. Re-enable *Launch at login* in Settings afterwards.
+
 ### Updates
 
 RMount checks GitHub for a new version about once a day and offers to install it

@@ -163,18 +163,18 @@ jobs:
         run: grep -E "error:|failed \(" it.log | grep -v warning | cut -c1-1200 || true
 
   # Real Backblaze B2 / Google Cloud Storage. No emulator exists for B2's native API, so these need
-  # test accounts: repository secrets MACSH_IT_B2_ACCOUNT/_KEY/_BUCKET and MACSH_IT_GCS_CREDENTIALS/
-  # _BUCKET (optional _PROJECT). Without them the tests skip.
+  # test accounts: repository secrets RMOUNT_IT_B2_ACCOUNT/_KEY/_BUCKET and RMOUNT_IT_GCS_CREDENTIALS/
+  # _BUCKET (optional _PROJECT). Without them the tests skip. The old MACSH_IT_* secret names still work.
   native-cloud-integration:
     runs-on: macos-14
     timeout-minutes: 20
     env:
-      RMOUNT_IT_B2_ACCOUNT: ${{ secrets.MACSH_IT_B2_ACCOUNT }}
-      RMOUNT_IT_B2_KEY: ${{ secrets.MACSH_IT_B2_KEY }}
-      RMOUNT_IT_B2_BUCKET: ${{ secrets.MACSH_IT_B2_BUCKET }}
-      RMOUNT_IT_GCS_CREDENTIALS: ${{ secrets.MACSH_IT_GCS_CREDENTIALS }}
-      RMOUNT_IT_GCS_BUCKET: ${{ secrets.MACSH_IT_GCS_BUCKET }}
-      RMOUNT_IT_GCS_PROJECT: ${{ secrets.MACSH_IT_GCS_PROJECT }}
+      RMOUNT_IT_B2_ACCOUNT: ${{ secrets.RMOUNT_IT_B2_ACCOUNT || secrets.MACSH_IT_B2_ACCOUNT }}
+      RMOUNT_IT_B2_KEY: ${{ secrets.RMOUNT_IT_B2_KEY || secrets.MACSH_IT_B2_KEY }}
+      RMOUNT_IT_B2_BUCKET: ${{ secrets.RMOUNT_IT_B2_BUCKET || secrets.MACSH_IT_B2_BUCKET }}
+      RMOUNT_IT_GCS_CREDENTIALS: ${{ secrets.RMOUNT_IT_GCS_CREDENTIALS || secrets.MACSH_IT_GCS_CREDENTIALS }}
+      RMOUNT_IT_GCS_BUCKET: ${{ secrets.RMOUNT_IT_GCS_BUCKET || secrets.MACSH_IT_GCS_BUCKET }}
+      RMOUNT_IT_GCS_PROJECT: ${{ secrets.RMOUNT_IT_GCS_PROJECT || secrets.MACSH_IT_GCS_PROJECT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -191,17 +191,17 @@ jobs:
         if: env.RMOUNT_IT_B2_KEY != '' || env.RMOUNT_IT_GCS_CREDENTIALS != ''
         run: swift test --filter NativeCloudAccountTests
 
-  # Real Google Drive. Needs a test account: add the repository secret MACSH_IT_GDRIVE_TOKEN
+  # Real Google Drive. Needs a test account: add the repository secret RMOUNT_IT_GDRIVE_TOKEN
   # (output of `rclone authorize drive`; optionally RMOUNT_IT_GDRIVE_CLIENT_ID/_CLIENT_SECRET and
   # RMOUNT_IT_GDRIVE_FOLDER). Without it the tests skip, and PRs from forks never get secrets.
   gdrive-integration:
     runs-on: macos-14
     timeout-minutes: 20
     env:
-      RMOUNT_IT_GDRIVE_TOKEN: ${{ secrets.MACSH_IT_GDRIVE_TOKEN }}
-      RMOUNT_IT_GDRIVE_CLIENT_ID: ${{ secrets.MACSH_IT_GDRIVE_CLIENT_ID }}
-      RMOUNT_IT_GDRIVE_CLIENT_SECRET: ${{ secrets.MACSH_IT_GDRIVE_CLIENT_SECRET }}
-      RMOUNT_IT_GDRIVE_FOLDER: ${{ secrets.MACSH_IT_GDRIVE_FOLDER }}
+      RMOUNT_IT_GDRIVE_TOKEN: ${{ secrets.RMOUNT_IT_GDRIVE_TOKEN || secrets.MACSH_IT_GDRIVE_TOKEN }}
+      RMOUNT_IT_GDRIVE_CLIENT_ID: ${{ secrets.RMOUNT_IT_GDRIVE_CLIENT_ID || secrets.MACSH_IT_GDRIVE_CLIENT_ID }}
+      RMOUNT_IT_GDRIVE_CLIENT_SECRET: ${{ secrets.RMOUNT_IT_GDRIVE_CLIENT_SECRET || secrets.MACSH_IT_GDRIVE_CLIENT_SECRET }}
+      RMOUNT_IT_GDRIVE_FOLDER: ${{ secrets.RMOUNT_IT_GDRIVE_FOLDER || secrets.MACSH_IT_GDRIVE_FOLDER }}
     steps:
       - uses: actions/checkout@v4
 

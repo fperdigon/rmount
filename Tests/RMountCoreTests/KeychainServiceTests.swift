@@ -2,7 +2,7 @@ import XCTest
 @testable import RMountCore
 
 final class KeychainServiceTests: XCTestCase {
-    let svc = KeychainService(serviceName: "ai.macsh.test")
+    let svc = KeychainService(serviceName: "ai.rmount.test")
     let id = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
 
     override func tearDown() {

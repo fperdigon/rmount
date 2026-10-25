@@ -18,7 +18,8 @@ public struct BuildInfo: Equatable {
     /// `RMOUNT_BUILD_SHA` build setting); the flavor comes from the `.lite` bundle id suffix.
     public init(infoDictionary: [String: Any]?, bundleIdentifier: String?) {
         self.version = (infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
-        self.sha = (infoDictionary?["RMountBuildSHA"] as? String) ?? "dev"
+        self.sha = (infoDictionary?["RMountBuildSHA"] as? String)
+            ?? (infoDictionary?[LegacyNames.buildSHAInfoKey] as? String) ?? "dev"
         self.isLite = bundleIdentifier?.hasSuffix(".lite") ?? false
     }
 
