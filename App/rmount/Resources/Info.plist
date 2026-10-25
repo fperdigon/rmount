@@ -22,6 +22,8 @@
     <string>1</string>
     <key>RMountBuildSHA</key>
     <string>$(RMOUNT_BUILD_SHA)</string>
+    <key>RMountBuildKind</key>
+    <string>$(RMOUNT_BUILD_KIND)</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

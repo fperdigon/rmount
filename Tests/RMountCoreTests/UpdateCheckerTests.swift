@@ -274,4 +274,16 @@ final class UpdatePreferencesTests: XCTestCase {
         p.autoCheckUpdates = false
         XCTAssertFalse(p.updateCheckDue(now: now), "disabled")
     }
+
+    func testDisplayVersionMarksNightliesOnly() {
+        let sha = "93f95bf453f7145dbb4b2c8abe37642e6c84205e"
+        let nightly = BuildInfo(infoDictionary: ["CFBundleShortVersionString": "0.1.4", "RMountBuildSHA": sha, "RMountBuildKind": "nightly"], bundleIdentifier: "ai.rmount")
+        XCTAssertTrue(nightly.isNightly)
+        XCTAssertEqual(nightly.displayVersion, "0.1.4 nightly (93f95bf)")
+        let release = BuildInfo(infoDictionary: ["CFBundleShortVersionString": "0.1.4", "RMountBuildSHA": sha, "RMountBuildKind": "release"], bundleIdentifier: "ai.rmount")
+        XCTAssertEqual(release.displayVersion, "0.1.4")
+        let local = BuildInfo(infoDictionary: ["CFBundleShortVersionString": "0.1.4", "RMountBuildSHA": "dev", "RMountBuildKind": "nightly"], bundleIdentifier: "ai.rmount")
+        XCTAssertEqual(local.displayVersion, "0.1.4", "a dev build never claims a commit")
+        XCTAssertEqual(BuildInfo(infoDictionary: nil, bundleIdentifier: nil).displayVersion, "0.0.0")
+    }
 }

@@ -36,6 +36,16 @@ echo "Building rmount and rmount-lite v${VERSION} ..."
 # The commit this build comes from; the app uses it to tell which nightly it is running.
 BUILD_SHA="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo dev)}"
 
+# What kind of build this is, so a nightly can say so in the app: a tag is a release, any other CI
+# run is a nightly, a local run is "dev".
+if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+    BUILD_KIND="release"
+elif [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    BUILD_KIND="nightly"
+else
+    BUILD_KIND="dev"
+fi
+
 BUILD_DIR="App/build"
 PRODUCTS="$BUILD_DIR/Build/Products/Release"
 DIST="dist"
@@ -53,6 +63,7 @@ build_target() {
         CODE_SIGN_IDENTITY="" \
         CODE_SIGNING_REQUIRED=NO \
         RMOUNT_BUILD_SHA="$BUILD_SHA" \
+        RMOUNT_BUILD_KIND="$BUILD_KIND" \
         build \
         | grep -E '(error:|warning:.*deprecated|BUILD SUCCEEDED|BUILD FAILED)' \
         || true

@@ -13,6 +13,7 @@ settings:
     SWIFT_VERSION: "5.9"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
     RMOUNT_BUILD_SHA: dev          # overridden by scripts/build-release.sh with the commit SHA
+    RMOUNT_BUILD_KIND: dev         # "nightly" or "release", set by scripts/build-release.sh in CI
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
     CODE_SIGN_IDENTITY: "-"
