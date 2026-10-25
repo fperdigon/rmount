@@ -8,7 +8,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- "Open in Finder" at the top of a mounted remote's submenu opens its mount folder.
+- "Open in Finder" at the top of a mounted remote's submenu opens its mount folder. Clicking a mounted remote in the menu opens it in Finder instead of unmounting it.
 - "About RMount" in the menu bar menu opens Settings on the About tab.
 
 ### Changed

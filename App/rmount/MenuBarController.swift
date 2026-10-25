@@ -47,7 +47,11 @@ final class MenuBarController {
             menu.addItem(NSMenuItem(title: "(no remotes)", action: nil, keyEquivalent: ""))
         } else {
             for session in manager.sessions {
-                let item = NSMenuItem(title: title(for: session), action: #selector(toggleMount(_:)), keyEquivalent: "")
+                let item = NSMenuItem(
+                    title: title(for: session),
+                    action: isMounted(session) ? #selector(openInFinder(_:)) : #selector(toggleMount(_:)),
+                    keyEquivalent: ""
+                )
                 item.target = self
                 item.representedObject = session.id
                 let submenu = NSMenu()
