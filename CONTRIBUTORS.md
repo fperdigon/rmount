@@ -16,6 +16,21 @@ RMount exists because of the people below. The complete, always current list is 
   more backends (SMB, WebDAV/Nextcloud, Google Drive, Azure, B2, GCS, raw rclone options),
   `rclone.conf` import, test coverage.
 
+## Who wrote the code
+
+Lines of code, text files only (code, tests, scripts, docs, workflows), as of release 0.1.4 plus
+the legacy-alias work (commit `a150871`). Commits Claude Code made on the maintainer's behalf count
+as the maintainer's; Claude is credited as co-author in the commit messages.
+
+| Author | Lines in the code today | Lines added over the history |
+| --- | --- | --- |
+| Francisco Perdigon Romero | 9,704 (73.0%) | 10,554 |
+| Ayon Pal (original macsh author) | 3,587 (27.0%) | 3,861 |
+
+Regenerate with `scripts/authorship.sh` (`--raw` shows Claude's commits separately). Surviving lines
+come from `git blame`, ignoring whitespace, moved lines and the mechanical macsh to RMount rename
+(`.git-blame-ignore-revs`), so the rename does not take Ayon's lines away from him.
+
 ## Third-party software
 
 - [rclone](https://rclone.org) and its contributors, whose work does the actual mounting.
