@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- "About RMount" in the menu bar menu opens Settings on the About tab.
+
 ### Changed
 
 - The version is shown without a trailing build number or commit in parentheses.

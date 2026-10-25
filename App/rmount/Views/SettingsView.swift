@@ -8,6 +8,12 @@ import RMountCore
 /// `Settings` scene because RMount runs as `LSUIElement=true` (no Dock icon,
 /// no app menu), so we host this in a regular NSWindow via NSHostingController.
 struct SettingsView: View {
+    /// Lets the menu bar switch the already-open window to a given tab.
+    final class Navigator: ObservableObject {
+        @Published var tab: Tab = .general
+    }
+
+    @ObservedObject var navigator: Navigator
     let loginItemManager: LoginItemManager
     let prefs: UserPreferences
     let onCheckForUpdates: () -> Void
@@ -33,7 +39,10 @@ struct SettingsView: View {
         }
     }
 
-    @State private var selection: Tab = .general
+    private var selection: Tab {
+        get { navigator.tab }
+        nonmutating set { navigator.tab = newValue }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
