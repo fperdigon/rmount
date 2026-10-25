@@ -7,24 +7,33 @@ public struct BuildInfo: Equatable {
     public let sha: String
     /// `rmount-lite` (uses the user's own rclone) rather than the bundled-rclone `rmount`.
     public let isLite: Bool
+    /// Built by the nightly pipeline (not a tagged release, not a local build).
+    public let isNightly: Bool
 
-    public init(version: String, sha: String, isLite: Bool) {
+    public init(version: String, sha: String, isLite: Bool, isNightly: Bool = false) {
         self.version = version
         self.sha = sha
         self.isLite = isLite
+        self.isNightly = isNightly
     }
 
-    /// Reads `CFBundleShortVersionString` and `RMountBuildSHA` (filled from the
-    /// `RMOUNT_BUILD_SHA` build setting); the flavor comes from the `.lite` bundle id suffix.
+    /// Reads `CFBundleShortVersionString`, `RMountBuildSHA` and `RMountBuildKind` (filled from the
+    /// `RMOUNT_BUILD_SHA` and `RMOUNT_BUILD_KIND` build settings); the flavor comes from the `.lite` bundle id suffix.
     public init(infoDictionary: [String: Any]?, bundleIdentifier: String?) {
         self.version = (infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
         self.sha = (infoDictionary?["RMountBuildSHA"] as? String)
             ?? (infoDictionary?[LegacyNames.buildSHAInfoKey] as? String) ?? "dev"
         self.isLite = bundleIdentifier?.hasSuffix(".lite") ?? false
+        self.isNightly = (infoDictionary?["RMountBuildKind"] as? String) == "nightly"
     }
 
     public static var current: BuildInfo {
         BuildInfo(infoDictionary: Bundle.main.infoDictionary, bundleIdentifier: Bundle.main.bundleIdentifier)
+    }
+
+    /// What the UI shows: the plain version, or "0.1.4 nightly (abc1234)" for a nightly build.
+    public var displayVersion: String {
+        isNightly && !isDevBuild ? "\(version) nightly (\(shortSHA))" : version
     }
 
     public var shortSHA: String { String(sha.prefix(7)) }
