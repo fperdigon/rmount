@@ -250,7 +250,7 @@ private struct UpdatesPane: View {
 
     private var running: String {
         let b = BuildInfo.current
-        return "RMount \(b.version)"
+        return "RMount \(b.displayVersion)"
     }
 
     var body: some View {
@@ -299,9 +299,6 @@ private struct UpdatesPane: View {
 // MARK: - About
 
 private struct AboutPane: View {
-    var version: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
-    }
     var bundleName: String {
         Bundle.main.infoDictionary?["CFBundleName"] as? String ?? "RMount"
     }
@@ -314,7 +311,7 @@ private struct AboutPane: View {
                 .foregroundStyle(.tint)
             Text(bundleName)
                 .font(.title2.weight(.semibold))
-            Text("Version \(version)")
+            Text("Version \(BuildInfo.current.displayVersion)")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Link("github.com/fperdigon/rmount",
