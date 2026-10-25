@@ -52,6 +52,13 @@ final class MenuBarController {
                 item.representedObject = session.id
                 let submenu = NSMenu()
                 submenu.autoenablesItems = false
+                if case .mounted = session.status {
+                    let open = NSMenuItem(title: "Open in Finder", action: #selector(openInFinder(_:)), keyEquivalent: "")
+                    open.target = self
+                    open.representedObject = session.id
+                    submenu.addItem(open)
+                    submenu.addItem(NSMenuItem.separator())
+                }
                 let mountToggle = NSMenuItem(
                     title: isMounted(session) ? "Unmount" : "Mount",
                     action: #selector(toggleMount(_:)),
@@ -170,6 +177,13 @@ final class MenuBarController {
             editWindows[id] = win
         }
         Self.present(editWindows[id])
+    }
+
+    @objc private func openInFinder(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID,
+              let session = manager.sessions.first(where: { $0.id == id }),
+              case .mounted(let path) = session.status else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
     @objc private func showLog(_ sender: NSMenuItem) {
