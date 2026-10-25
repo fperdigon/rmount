@@ -1,0 +1,3 @@
+# Mechanical macsh -> RMount rename: it touched lines without writing them. GitHub blame and
+# scripts/authorship.sh skip these commits. Use locally with: git config blame.ignoreRevsFile .git-blame-ignore-revs
+9477c60d58498820fccccea0dab1194b5d7d0778

@@ -14,7 +14,6 @@ No macFUSE. No kernel extensions. No security prompts.
 ![Platform](https://img.shields.io/badge/macOS-14%2B%20Apple%20Silicon-blue)
 ![Swift](https://img.shields.io/badge/Swift-5.9-orange)
 [![Last commit](https://img.shields.io/github/last-commit/fperdigon/rmount)](https://github.com/fperdigon/rmount/commits/main)
-[![Contributors](https://img.shields.io/github/contributors/fperdigon/rmount)](CONTRIBUTORS.md)
 
 [Download](https://github.com/fperdigon/rmount/releases) ·
 [Install](#install) ·
@@ -148,9 +147,14 @@ Bug reports and pull requests are welcome. Especially useful right now:
 
 ## Contributors
 
-<a href="https://github.com/fperdigon/rmount/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=fperdigon/rmount" alt="RMount contributors">
-</a>
+<table>
+  <tr>
+    <td align="center"><a href="https://github.com/AyonPal"><img src="https://github.com/AyonPal.png?size=100" width="80" alt="Ayon Pal"><br><sub><b>Ayon Pal</b></sub></a><br><sub>original macsh author</sub></td>
+    <td align="center"><a href="https://github.com/fperdigon"><img src="https://github.com/fperdigon.png?size=100" width="80" alt="Francisco Perdigon Romero"><br><sub><b>Francisco Perdigon Romero</b></sub></a><br><sub>RMount maintainer</sub></td>
+  </tr>
+</table>
+
+Who wrote how much: [CONTRIBUTORS.md](CONTRIBUTORS.md#who-wrote-the-code).
 
 ## License
 
