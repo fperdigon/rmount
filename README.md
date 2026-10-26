@@ -60,7 +60,19 @@ so nothing needs to be installed in the kernel.
 
 ## Install
 
-Pick one DMG from the [latest release](https://github.com/fperdigon/rmount/releases) and drag
+### Homebrew
+
+```bash
+brew install --cask fperdigon/rmount/rmount
+```
+
+Use `fperdigon/rmount/rmount-lite` for the lite flavour (it installs rclone for you). The cask clears the
+Gatekeeper flag after installing, so the app opens without the prompt below. The tap is
+[fperdigon/homebrew-rmount](https://github.com/fperdigon/homebrew-rmount).
+
+### Download
+
+Or pick one DMG from the [latest release](https://github.com/fperdigon/rmount/releases) and drag
 the app to `/Applications`.
 
 The apps are signed ad hoc but not notarized (no Apple Developer ID yet), so the first launch
