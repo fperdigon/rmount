@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Homebrew install: `brew install --cask fperdigon/rmount/rmount` (and `rmount-lite`), from the new tap `fperdigon/homebrew-rmount`.
+
 ## [0.1.5] — 2026-10-25
 
 ### Added
