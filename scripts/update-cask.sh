@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Points the Homebrew casks in fperdigon/homebrew-rmount at a freshly built release: rewrites
+# Points the Homebrew casks in fperdigon/homebrew-tap at a freshly built release: rewrites
 # `version` and `sha256` in Casks/rmount.rb and Casks/rmount-lite.rb from the DMGs in dist/.
 # Usage: scripts/update-cask.sh <version>        (version without the leading "v")
 # Needs HOMEBREW_TAP_TOKEN (a token that can push to the tap), or TAP_URL to push somewhere else.
@@ -12,7 +12,7 @@ dist="${DIST:-dist}"
 tap_url="${TAP_URL:-}"
 if [ -z "$tap_url" ]; then
     : "${HOMEBREW_TAP_TOKEN:?set HOMEBREW_TAP_TOKEN or TAP_URL}"
-    tap_url="https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/fperdigon/homebrew-rmount.git"
+    tap_url="https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/fperdigon/homebrew-tap.git"
 fi
 
 work="$(mktemp -d)"
