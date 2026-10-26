@@ -66,13 +66,15 @@ public struct TransferTuning: Codable, Equatable {
         readChunkSize = try c.decodeIfPresent(String.self, forKey: .readChunkSize) ?? ""
     }
 
-    /// WebDAV keeps the original conservative settings. NFS issues many small reads, so
+    /// Energy saving caches directories for 5 minutes; responsive keeps the original 10s.
+    /// Polling backends use the same efficient defaults in both modes.
+    /// WebDAV keeps conservative transfer settings. NFS issues many small reads, so
     /// it needs a read cache + read-ahead (measured 2.5 MB/s with `writes` vs ~17 MB/s).
     ///
     /// Cloud remotes that report changes (`pollingBackends`) get a long directory cache kept
     /// fresh by polling, and the folder tree is prefetched: re-listing every 10s through the
     /// cloud API made every folder visit slow and starved the mount.
-    public static func defaults(for proto: MountProtocol, backendType: String? = nil) -> TransferTuning {
+    public static func defaults(for proto: MountProtocol, backendType: String? = nil, mode: UpdateMode = .energySaver) -> TransferTuning {
         var t: TransferTuning
         switch proto {
         case .webdav:
@@ -84,6 +86,8 @@ public struct TransferTuning: Codable, Equatable {
             t.dirCacheTime = "1h"
             t.pollInterval = "30s"
             t.prefetchFolders = true
+        } else if mode == .energySaver {
+            t.dirCacheTime = "5m"
         }
         return t
     }

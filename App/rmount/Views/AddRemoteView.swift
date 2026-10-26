@@ -52,6 +52,7 @@ struct AddRemoteView: View {
     @State private var authorizer = OAuthAuthorizer()
     @State private var error: String?
     @State private var customizeTuning: Bool
+    @State private var updateMode: UpdateMode
     @State private var tuning: TransferTuning
     @State private var readOnly: Bool
     @State private var bandwidth: String
@@ -105,7 +106,8 @@ struct AddRemoteView: View {
         var initialType: String? = initialKind.descriptor?.type
         if case .rclone(let cfg)? = editing?.backend { initialType = cfg.type }
         _customizeTuning = State(initialValue: editing?.tuning != nil)
-        _tuning = State(initialValue: editing?.tuning ?? .defaults(for: proto, backendType: initialType))
+        _updateMode = State(initialValue: editing?.updateMode ?? .energySaver)
+        _tuning = State(initialValue: editing?.tuning ?? .defaults(for: proto, backendType: initialType, mode: editing?.updateMode ?? .energySaver))
         _readOnly = State(initialValue: editing?.readOnly ?? false)
         _bandwidth = State(initialValue: editing?.bandwidthLimit ?? "")
         _sftp = State(initialValue: sftpDraft)
@@ -151,7 +153,7 @@ struct AddRemoteView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     form
-                    TuningSection(customize: $customizeTuning, tuning: $tuning, mountProtocol: currentProtocol, backendType: currentBackendType)
+                    TuningSection(customize: $customizeTuning, updateMode: $updateMode, tuning: $tuning, mountProtocol: currentProtocol, backendType: currentBackendType)
                     MountOptionsSection(readOnly: $readOnly, bandwidth: $bandwidth)
                 }
                 .padding(20)
@@ -253,6 +255,7 @@ struct AddRemoteView: View {
             remote = r; draft.options = secrets
         }
         remote.tuning = customizeTuning ? tuning : nil
+        remote.updateMode = updateMode
         remote.readOnly = readOnly
         let bw = bandwidth.trimmingCharacters(in: .whitespaces)
         remote.bandwidthLimit = bw.isEmpty ? nil : bw

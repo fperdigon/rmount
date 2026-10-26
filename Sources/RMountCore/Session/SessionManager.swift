@@ -94,6 +94,16 @@ public final class SessionManager: ObservableObject {
                 try await self.mount(remoteID: remoteID)
                 self.retryTasks[remoteID] = nil
             } catch {
+                if let session = self.sessions.first(where: { $0.id == remoteID }),
+                   case .failed(let reason) = session.status,
+                   Self.isPermanentAuthFailure(reason) {
+                    self.retryTasks[remoteID] = nil
+                    let hint = "Sign-in expired. Edit the remote and sign in again."
+                    if !reason.hasSuffix(hint) {
+                        session.transition(to: .failed(reason: reason + "\n" + hint))
+                    }
+                    return
+                }
                 let nextAttempt = attempt + 1
                 let delay = Self.backoffDelay(attempt: nextAttempt)
                 guard delay > 0 else { return }
@@ -103,6 +113,12 @@ public final class SessionManager: ObservableObject {
                 }
             }
         }
+    }
+
+    static func isPermanentAuthFailure(_ reason: String) -> Bool {
+        let text = reason.lowercased()
+        return ["invalid_grant", "couldn't fetch token", "cannot fetch token", "token expired"]
+            .contains { text.contains($0) }
     }
 
     /// Exponential backoff: 1s, 5s, 30s, then 5min cap.

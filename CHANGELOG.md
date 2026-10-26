@@ -8,7 +8,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Remotes without change notifications (SFTP, FTP, S3, SMB, WebDAV and the like) now default to an Energy saving mode with a 5 minute directory cache, so rclone stops re-listing the server every 10 seconds and uses far less CPU and battery. Responsive mode (10 seconds, the previous behaviour) can be chosen per remote under Performance > Updates.
 - The menu bar icon and the About page use the new RM drive icon (they still showed the old folder icon and a generic drive symbol).
+
+### Fixed
+
+- A remote whose sign-in has expired (for example Google Drive) is no longer retried every 5 minutes forever; it stops and asks you to sign in again.
 
 ### Added
 

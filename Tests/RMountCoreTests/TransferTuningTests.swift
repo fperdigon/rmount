@@ -13,12 +13,12 @@ final class TransferTuningTests: XCTestCase {
     }
 
     func testWebDAVDefaultsKeepPreviousBehavior() {
-        let args = TransferTuning.defaults(for: .webdav).serveArgs(liveUpdates: true)
+        let args = TransferTuning.defaults(for: .webdav, mode: .responsive).serveArgs(liveUpdates: true)
         XCTAssertEqual(args, ["--vfs-cache-mode", "writes", "--dir-cache-time", "10s", "--vfs-fast-fingerprint"])
     }
 
     func testNFSServeArgs() {
-        let args = TransferTuning.defaults(for: .nfs).serveArgs(liveUpdates: true)
+        let args = TransferTuning.defaults(for: .nfs, mode: .responsive).serveArgs(liveUpdates: true)
         XCTAssertEqual(args, [
             "--vfs-cache-mode", "full",
             "--vfs-cache-max-size", "5G",
@@ -93,6 +93,7 @@ final class TransferTuningTests: XCTestCase {
          "mountProtocol":"nfs","backend":{"ftp":{"_0":{"host":"h","port":21,"user":"u","remotePath":"","tlsMode":"off"}}}}
         """
         let r = try JSONDecoder().decode(Remote.self, from: Data(json.utf8))
+        XCTAssertEqual(r.updateMode, .energySaver)
         XCTAssertNil(r.tuning)
         XCTAssertTrue(r.liveUpdates)
     }
@@ -110,6 +111,55 @@ final class TransferTuningTests: XCTestCase {
         XCTAssertEqual(decoded.tuning?.readAhead, "256M")
     }
 
+    func testUpdateModeLabelsAndSummaries() {
+        XCTAssertEqual(UpdateMode.energySaver.displayName, "Energy saving")
+        XCTAssertEqual(UpdateMode.responsive.displayName, "Responsive")
+        XCTAssertEqual(UpdateMode.energySaver.summary, "Checks the server for changes less often, so rclone and your Mac use less energy. Changes made on the server can take a few minutes to appear. Changes you make through the mount show up at once.")
+        XCTAssertEqual(UpdateMode.responsive.summary, "Checks the server every few seconds so changes appear quickly, at the cost of more CPU and battery.")
+    }
+
+    func testUpdateModesOnlyChangeNonPollingDirectoryCache() {
+        for proto in MountProtocol.allCases {
+            for type in ["sftp", "webdav"] {
+                let saver = TransferTuning.defaults(for: proto, backendType: type)
+                var responsive = TransferTuning.defaults(for: proto, backendType: type, mode: .responsive)
+                XCTAssertEqual(saver.dirCacheTime, "5m")
+                XCTAssertEqual(responsive.dirCacheTime, "10s")
+                for t in [saver, responsive] {
+                    let args = t.serveArgs(liveUpdates: true)
+                    let index = args.firstIndex(of: "--dir-cache-time")!
+                    XCTAssertEqual(args[index + 1], t.dirCacheTime)
+                }
+                responsive.dirCacheTime = "5m"
+                XCTAssertEqual(saver, responsive)
+            }
+            for type in TransferTuning.pollingBackends {
+                XCTAssertEqual(TransferTuning.defaults(for: proto, backendType: type),
+                               .defaults(for: proto, backendType: type, mode: .responsive))
+            }
+        }
+    }
+
+    func testRemoteUpdateModesRoundTripAndControlEffectiveTuning() throws {
+        for backend in [sftpBackend(), webdavBackend(), driveBackend()] {
+            var r = makeRemote(backend: backend, proto: .nfs)
+            for mode in UpdateMode.allCases {
+                r.updateMode = mode
+                let decoded = try JSONDecoder().decode(Remote.self, from: JSONEncoder().encode(r))
+                XCTAssertEqual(decoded, r)
+                let expected = backend == driveBackend() ? "1h" : (mode == .energySaver ? "5m" : "10s")
+                XCTAssertEqual(decoded.effectiveTuning.dirCacheTime, expected)
+            }
+            var custom = TransferTuning.defaults(for: .webdav)
+            custom.dirCacheTime = "42s"
+            r.tuning = custom
+            for mode in UpdateMode.allCases {
+                r.updateMode = mode
+                XCTAssertEqual(r.effectiveTuning, custom)
+            }
+        }
+    }
+
     // MARK: cloud listing (prefetch, long cache + polling)
 
     func testDriveDefaultsPrefetchAndPoll() {
@@ -121,10 +171,10 @@ final class TransferTuningTests: XCTestCase {
         XCTAssertNil(t.validate())
     }
 
-    func testNonPollingBackendsKeepTheShortCache() {
+    func testNonPollingBackendsUseEnergySavingCache() {
         for type in [nil, "sftp", "s3", "webdav", "smb", "azureblob"] as [String?] {
             let t = TransferTuning.defaults(for: .nfs, backendType: type)
-            XCTAssertEqual(t.dirCacheTime, "10s", "\(type ?? "nil")")
+            XCTAssertEqual(t.dirCacheTime, "5m", "\(type ?? "nil")")
             XCTAssertFalse(t.prefetchFolders)
             XCTAssertEqual(t.pollInterval, "")
         }
