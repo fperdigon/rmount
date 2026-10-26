@@ -7,6 +7,7 @@ import RMountCore
 /// full-width rounded text fields.
 struct TuningSection: View {
     @Binding var customize: Bool
+    @Binding var updateMode: UpdateMode
     @Binding var tuning: TransferTuning
     let mountProtocol: MountProtocol
     /// rclone backend type ("drive", "onedrive", ...) for generic backends, else nil.
@@ -15,10 +16,25 @@ struct TuningSection: View {
     var body: some View {
         Form {
             Section("Performance") {
+                LabeledContent("Updates") {
+                    Picker("", selection: $updateMode) {
+                        ForEach(UpdateMode.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+                Text(updateMode.summary + (updateMode == .energySaver ? " Recommended." : ""))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if customize {
+                    Text("The customized values below override this choice.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 LabeledContent("Settings") {
                     Toggle("Customize performance settings", isOn: $customize)
                         .onChange(of: customize) { _, on in
-                            if on { tuning = .defaults(for: mountProtocol, backendType: backendType) }
+                            if on { tuning = .defaults(for: mountProtocol, backendType: backendType, mode: updateMode) }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -67,7 +83,7 @@ struct TuningSection: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Button("Reset to defaults") { tuning = .defaults(for: mountProtocol, backendType: backendType) }
+                        Button("Reset to defaults") { tuning = .defaults(for: mountProtocol, backendType: backendType, mode: updateMode) }
                     }
                 }
             }
@@ -77,7 +93,7 @@ struct TuningSection: View {
     }
 
     private var defaultsSummary: String {
-        let d = TransferTuning.defaults(for: mountProtocol, backendType: backendType)
+        let d = TransferTuning.defaults(for: mountProtocol, backendType: backendType, mode: updateMode)
         var s = "Defaults for \(mountProtocol == .nfs ? "NFS" : "WebDAV"): cache \(d.cacheMode.rawValue)"
         if !d.readAhead.isEmpty { s += ", read-ahead \(d.readAhead)" }
         if !d.cacheMaxSize.isEmpty { s += ", up to \(d.cacheMaxSize)" }

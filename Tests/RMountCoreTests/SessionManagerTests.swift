@@ -523,6 +523,70 @@ final class SessionManagerTests: XCTestCase {
 
     // MARK: - Auto-mount
 
+    func testPermanentAuthFailureClassification() {
+        for reason in ["invalid_grant", "INVALID_GRANT: revoked", "couldn't fetch token: denied",
+                       "Cannot Fetch Token", "OAuth TOKEN EXPIRED yesterday"] {
+            XCTAssertTrue(SessionManager.isPermanentAuthFailure(reason), reason)
+        }
+        for reason in ["", "connection refused", "permission denied", "token refresh succeeded", "timeout"] {
+            XCTAssertFalse(SessionManager.isPermanentAuthFailure(reason), reason)
+        }
+    }
+
+    func testAutoMountPermanentAuthFailureStopsRetrying() async throws {
+        let hint = "Sign-in expired. Edit the remote and sign in again."
+        for log in ["couldn't fetch token: invalid_grant", "invalid_grant\n" + hint] {
+            let f = try makeFixture()
+            let r = makeRemote(backend: s3Backend(), autoMount: true)
+            try f.manager.add(r) // Missing credentials fail the mount; the log supplies rclone's reason.
+            try log.write(to: f.manager.logURL(for: r.id), atomically: true, encoding: .utf8)
+            let failed = expectation(description: "sign-in failure with recovery hint")
+            let retried = expectation(description: "no second attempt")
+            retried.isInverted = true
+            var starts = 0
+            var reported = false
+            let cancel = f.manager.sessions[0].$status.sink { status in
+                if case .starting = status {
+                    starts += 1
+                    if starts > 1 { retried.fulfill() }
+                }
+                if case .failed(let reason) = status, reason.hasSuffix(hint), !reported {
+                    reported = true
+                    failed.fulfill()
+                }
+            }
+            defer { cancel.cancel() }
+            f.manager.autoMountAll()
+            await fulfillment(of: [failed], timeout: 10)
+            await fulfillment(of: [retried], timeout: 1.5)
+            guard case .failed(let reason) = f.manager.sessions[0].status else {
+                return XCTFail("expected permanent sign-in failure")
+            }
+            XCTAssertTrue(reason.contains("invalid_grant"))
+            XCTAssertEqual(reason.components(separatedBy: hint).count - 1, 1)
+            XCTAssertEqual(starts, 1)
+        }
+    }
+
+    func testAutoMountTransientFailureRetries() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend(), autoMount: true)
+        try f.manager.add(r)
+        try "connection refused".write(to: f.manager.logURL(for: r.id), atomically: true, encoding: .utf8)
+        let retried = expectation(description: "transient failure retried")
+        var starts = 0
+        let cancel = f.manager.sessions[0].$status.sink { status in
+            if case .starting = status {
+                starts += 1
+                if starts == 2 { retried.fulfill() }
+            }
+        }
+        defer { cancel.cancel() }
+        f.manager.autoMountAll()
+        await fulfillment(of: [retried], timeout: 10)
+        f.manager.shutdownAll()
+    }
+
     func testAutoMountAllReconcilesAndMountsAutoMountRemotes() async throws {
         let f = try makeFixture()
         let auto = makeRemote(name: "auto", backend: s3Backend(), autoMount: true)

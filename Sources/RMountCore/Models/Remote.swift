@@ -7,7 +7,10 @@ public struct Remote: Codable, Equatable, Identifiable {
     public var mountProtocol: MountProtocol
     public var autoMount: Bool
     public var liveUpdates: Bool
-    /// nil = `TransferTuning.defaults(for: mountProtocol)`.
+    /// How eagerly rclone re-reads the server's folders: energy saving (default) or responsive.
+    /// Ignored when `tuning` holds the user's own values.
+    public var updateMode: UpdateMode
+    /// nil = defaults for the mount protocol, backend and update mode.
     public var tuning: TransferTuning?
     /// Reject writes (`rclone serve --read-only`).
     public var readOnly: Bool
@@ -23,7 +26,8 @@ public struct Remote: Codable, Equatable, Identifiable {
         liveUpdates: Bool = true,
         tuning: TransferTuning? = nil,
         readOnly: Bool = false,
-        bandwidthLimit: String? = nil
+        bandwidthLimit: String? = nil,
+        updateMode: UpdateMode = .energySaver
     ) {
         self.id = id
         self.name = name
@@ -34,18 +38,19 @@ public struct Remote: Codable, Equatable, Identifiable {
         self.tuning = tuning
         self.readOnly = readOnly
         self.bandwidthLimit = bandwidthLimit
+        self.updateMode = updateMode
     }
 
     /// The tuning actually used when mounting: the saved one, or the defaults for this
-    /// remote's protocol and (for generic rclone backends) backend type.
+    /// remote's protocol, update mode and (for generic rclone backends) backend type.
     public var effectiveTuning: TransferTuning {
         if let tuning { return tuning }
-        if case .rclone(let cfg) = backend { return .defaults(for: mountProtocol, backendType: cfg.type) }
-        return .defaults(for: mountProtocol)
+        if case .rclone(let cfg) = backend { return .defaults(for: mountProtocol, backendType: cfg.type, mode: updateMode) }
+        return .defaults(for: mountProtocol, mode: updateMode)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, backend, mountProtocol, autoMount, liveUpdates, tuning, readOnly, bandwidthLimit
+        case id, name, backend, mountProtocol, autoMount, liveUpdates, tuning, readOnly, bandwidthLimit, updateMode
     }
 
     public init(from decoder: Decoder) throws {
@@ -57,6 +62,8 @@ public struct Remote: Codable, Equatable, Identifiable {
         self.autoMount = try c.decode(Bool.self, forKey: .autoMount)
         // Pre-existing remotes.json files predate this field; default to live (matches the form default).
         self.liveUpdates = try c.decodeIfPresent(Bool.self, forKey: .liveUpdates) ?? true
+        // Likewise for remotes saved before the update mode existed: they get the energy-saving default.
+        self.updateMode = try c.decodeIfPresent(UpdateMode.self, forKey: .updateMode) ?? .energySaver
         self.tuning = try c.decodeIfPresent(TransferTuning.self, forKey: .tuning)
         self.readOnly = try c.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
         self.bandwidthLimit = try c.decodeIfPresent(String.self, forKey: .bandwidthLimit)

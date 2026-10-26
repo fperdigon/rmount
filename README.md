@@ -47,8 +47,8 @@ so nothing needs to be installed in the kernel.
 - **Other rclone backend**: any rclone backend type with `name = value` options; secret options are kept in the Keychain, never in a file.
 - **Google Drive**: browser sign-in; optional shared drive, root folder and your own OAuth client.
 - **Import from `rclone.conf`**: bring your existing remotes with you.
-- **Per-remote performance settings**: cache mode, read-ahead, buffer size, write-back delay.
-- **Live updates**: changes on the server show up in seconds.
+- **Per-remote performance settings**: Energy saving / Responsive updates, cache mode, read-ahead, buffer size, write-back delay.
+- **Live updates**: changes on the server show up in seconds in Responsive mode, or within a few minutes in the default Energy saving mode.
 - **Auto-mount at login.**
 - **Passwords stored in your Keychain**, never on disk in plaintext.
 
