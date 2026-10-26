@@ -306,9 +306,9 @@ private struct AboutPane: View {
     var body: some View {
         VStack(spacing: 12) {
             Spacer()
-            Image(systemName: "externaldrive.connected.to.line.below")
-                .font(.system(size: 48, weight: .light))
-                .foregroundStyle(.tint)
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 72, height: 72)
             Text(bundleName)
                 .font(.title2.weight(.semibold))
             Text("Version \(BuildInfo.current.displayVersion)")
