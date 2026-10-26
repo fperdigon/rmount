@@ -10,10 +10,6 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Homebrew casks moved to the combined tap `fperdigon/homebrew-tap` (`brew install --cask fperdigon/tap/rmount` and `fperdigon/tap/rmount-lite`).
 
-### Changed
-
-- Homebrew install: `brew install --cask fperdigon/rmount/rmount` (and `rmount-lite`), from the new tap `fperdigon/homebrew-rmount`.
-
 ## [0.1.5] — 2026-10-25
 
 ### Added
