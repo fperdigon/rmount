@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The menu bar icon and the About page use the new RM drive icon (they still showed the old folder icon and a generic drive symbol).
+
 ### Added
 
 - Homebrew casks moved to the combined tap `fperdigon/homebrew-tap` (`brew install --cask fperdigon/tap/rmount` and `fperdigon/tap/rmount-lite`).
