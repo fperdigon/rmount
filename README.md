@@ -135,7 +135,7 @@ work, and the git history of this repository keeps his commits. Many thanks to A
 Mounting is done by [rclone](https://rclone.org) (MIT licensed), which RMount bundles in the
 full flavour. See [NOTICE](NOTICE) and [CONTRIBUTORS.md](CONTRIBUTORS.md) for details.
 
-The fork is maintained by Francisco Perdigon Romero at [Core AI](https://core-ai.net).
+Maintained by [Francisco Perdigon Romero](https://github.com/fperdigon), founder of [Core AI](https://core-ai.net), a company specializing in privacy-focused enterprise AI solutions.
 Fixes that are useful to the original project are also offered back upstream.
 
 ## Contributing

@@ -11,7 +11,7 @@ RMount exists because of the people below. The complete, always current list is 
 
 ## Maintainer of the fork
 
-- **[Francisco Perdigon Romero](https://github.com/fperdigon)** ([Core AI](https://core-ai.net)):
+- **[Francisco Perdigon Romero](https://github.com/fperdigon)**:
   CI and releases, in-app updates, async mount and unmount, NFS performance, per-remote tuning,
   more backends (SMB, WebDAV/Nextcloud, Google Drive, Azure, B2, GCS, raw rclone options),
   `rclone.conf` import, test coverage.
