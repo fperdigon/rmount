@@ -31,6 +31,9 @@ WebDAV/Nextcloud, SMB and Google Drive (the generic `Backend.rclone` model; OAut
   upload and cold-read speed, measured on the wire with `nettop`); tests for both are in
   `scripts/tests/` (`python3 -m unittest discover -s scripts/tests`); `scripts/ci/` – servers
   used by the integration CI jobs.
+- Homebrew: the casks live in the separate repo `fperdigon/homebrew-rmount`. A `v*` tag runs
+  `scripts/update-cask.sh`, which rewrites `version` and `sha256` there; it needs the repository secret
+  `HOMEBREW_TAP_TOKEN` (a token that can push to the tap) and is skipped with a notice without it.
 - `.github/workflows/` – `ci.yml` (build, tests, coverage, integration, app compile), `release.yml`.
 
 ## Build and test
