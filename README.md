@@ -63,12 +63,12 @@ so nothing needs to be installed in the kernel.
 ### Homebrew
 
 ```bash
-brew install --cask fperdigon/rmount/rmount
+brew install --cask fperdigon/tap/rmount
 ```
 
-Use `fperdigon/rmount/rmount-lite` for the lite flavour (it installs rclone for you). The cask clears the
+Use `brew install --cask fperdigon/tap/rmount-lite` for the lite flavour (it installs rclone for you). The cask clears the
 Gatekeeper flag after installing, so the app opens without the prompt below. The tap is
-[fperdigon/homebrew-rmount](https://github.com/fperdigon/homebrew-rmount).
+[fperdigon/homebrew-tap](https://github.com/fperdigon/homebrew-tap). People who installed from the old tap `fperdigon/rmount` are migrated automatically by `brew update`.
 
 ### Download
 
