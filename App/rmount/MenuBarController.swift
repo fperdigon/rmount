@@ -267,15 +267,19 @@ final class MenuBarController {
     }
 
     @objc private func showTransfers(_ sender: NSMenuItem) {
-        transfersNavigator.remoteID = sender.representedObject as? UUID
+        if let remoteID = sender.representedObject as? UUID {
+            transfersNavigator.remoteID = remoteID
+        } else if transfersWindow?.isVisible != true {
+            transfersNavigator.remoteID = nil
+        }
         if transfersWindow == nil {
             let view = TransfersView(manager: manager, navigator: transfersNavigator)
             let win = NSWindow(contentViewController: NSHostingController(rootView: view))
             win.title = "Transfers"
             win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             win.isReleasedWhenClosed = false
-            win.setContentSize(NSSize(width: 580, height: 420))
-            win.contentMinSize = NSSize(width: 420, height: 240)
+            win.setContentSize(NSSize(width: 640, height: 520))
+            win.contentMinSize = NSSize(width: 420, height: 320)
             transfersWindow = win
         }
         Self.present(transfersWindow)

@@ -9,36 +9,45 @@ struct TransfersView: View {
     @ObservedObject var manager: SessionManager
     @ObservedObject var navigator: Navigator
 
-    private var visibleSessions: [RemoteSession] {
-        manager.sessions.filter { session in
-            if let id = navigator.remoteID { return session.id == id }
-            guard let status = manager.uploadStatus[session.id] else { return false }
-            return status.hasPending || status.isStale
-        }
+    private var presentation: TransfersPresentation {
+        TransfersPresentation(remotes: manager.sessions.map(\.remote), statuses: manager.uploadStatus,
+                              selectedRemoteID: navigator.remoteID)
     }
 
     var body: some View {
+        let snapshot = presentation
         VStack(alignment: .leading, spacing: 16) {
-            Picker("Remote", selection: $navigator.remoteID) {
+            Picker("Remote", selection: Binding(
+                get: { presentation.selectedRemoteID },
+                set: { navigator.remoteID = $0 }
+            )) {
                 Text("All remotes").tag(nil as UUID?)
-                ForEach(manager.sessions) { session in
-                    Text(session.remote.name).tag(Optional(session.id))
+                ForEach(snapshot.options) { option in
+                    Text(option.label).tag(Optional(option.id))
                 }
             }
-            if visibleSessions.isEmpty {
+            .pickerStyle(.menu)
+            if snapshot.sections.isEmpty {
                 idle
             } else {
-                ScrollView {
+                ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 16) {
-                        ForEach(visibleSessions) { session in
-                            remoteSection(session)
+                        ForEach(snapshot.sections) { section in
+                            remoteSection(section)
                         }
                     }
+                    .padding(2)
                 }
+                .scrollIndicators(.automatic)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .padding(20)
-        .frame(minWidth: 380, minHeight: 200)
+        .frame(minWidth: 420, minHeight: 320)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onChange(of: manager.sessions.map(\.id)) { _, _ in
+            navigator.remoteID = presentation.selectedRemoteID
+        }
     }
 
     private var idle: some View {
@@ -47,18 +56,28 @@ struct TransfersView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func remoteSection(_ session: RemoteSession) -> some View {
-        let status = manager.uploadStatus[session.id] ?? UploadStatus()
+    private func remoteSection(_ section: TransfersPresentation.RemoteSection) -> some View {
+        let status = section.status
         return GroupBox {
             VStack(alignment: .leading, spacing: 12) {
                 if status.isStale {
                     Label("Waiting for rclone…", systemImage: "clock")
                         .foregroundStyle(.secondary)
                 }
-                if status.hasPending {
+                if status.hasPending || !section.rows.isEmpty {
                     Text(status.summary.text).font(.subheadline)
-                    ForEach(Array(status.transfers.enumerated()), id: \.offset) { _, transfer in
-                        TransferRow(transfer: transfer, isStale: status.isStale)
+                    if section.scrollsFiles {
+                        Text("\(section.rows.count) files • Scroll to see all files")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ScrollView(.vertical) {
+                            fileRows(section)
+                                .padding(.trailing, 10)
+                        }
+                        .scrollIndicators(.automatic)
+                        .frame(height: 280)
+                    } else {
+                        fileRows(section)
                     }
                 } else if !status.isStale {
                     Text("No uploads in progress").foregroundStyle(.secondary)
@@ -67,7 +86,15 @@ struct TransfersView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         } label: {
-            Text(session.remote.name).font(.headline)
+            Text(section.name).font(.headline)
+        }
+    }
+
+    private func fileRows(_ section: TransfersPresentation.RemoteSection) -> some View {
+        LazyVStack(alignment: .leading, spacing: 12) {
+            ForEach(section.rows) { row in
+                TransferRow(transfer: row.transfer, isStale: section.status.isStale)
+            }
         }
     }
 }
