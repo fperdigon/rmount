@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Finder's list view shows a progress circle beside files while they upload to the remote, including files waiting in the upload queue. Enabled by default; configurable in General settings.
+
 ## [0.2.0] — 2026-11-21
 
 ### Changed

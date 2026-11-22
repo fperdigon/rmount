@@ -50,4 +50,37 @@ final class UserPreferencesTests: DebugTestCase {
         prefs.customRclonePath = nil
         XCTAssertNil(prefs.customRclonePath)
     }
+
+    func testFinderUploadProgressDefaultsToEnabled() {
+        XCTAssertTrue(UserPreferences(defaults: defaults).showFinderUploadProgress)
+    }
+
+    func testFinderUploadProgressPersistsUnderCurrentKey() {
+        let prefs = UserPreferences(defaults: defaults)
+        prefs.showFinderUploadProgress = false
+        XCTAssertFalse(UserPreferences(defaults: defaults).showFinderUploadProgress)
+        XCTAssertEqual(defaults.object(forKey: "rmount.showFinderUploadProgress") as? Bool, false)
+        XCTAssertNil(defaults.object(forKey: "macsh.showFinderUploadProgress"))
+        prefs.showFinderUploadProgress = true
+        XCTAssertTrue(UserPreferences(defaults: defaults).showFinderUploadProgress)
+    }
+
+    func testFinderUploadProgressNotifiesWhenChanged() {
+        let prefs = UserPreferences(defaults: defaults)
+        let changed = expectation(forNotification: UserPreferences.showFinderUploadProgressDidChange,
+                                  object: prefs) { _ in
+            !prefs.showFinderUploadProgress
+        }
+        prefs.showFinderUploadProgress = false
+        wait(for: [changed], timeout: 1)
+    }
+
+    func testFinderUploadProgressDoesNotNotifyForUnchangedValue() {
+        let prefs = UserPreferences(defaults: defaults)
+        let unchanged = expectation(forNotification: UserPreferences.showFinderUploadProgressDidChange,
+                                    object: prefs)
+        unchanged.isInverted = true
+        prefs.showFinderUploadProgress = true
+        wait(for: [unchanged], timeout: 0.05)
+    }
 }

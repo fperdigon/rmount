@@ -54,7 +54,9 @@ final class SessionManagerTests: DebugTestCase {
         let dir: URL
     }
 
-    private func makeFixture(controlClient: RcloneControlClient? = nil) throws -> Fixture {
+    private func makeFixture(controlClient: RcloneControlClient? = nil,
+                             finderProgressFactory: FinderProgressFactory? = nil,
+                             preferences: UserPreferences? = nil) throws -> Fixture {
         try FakeRclone.requirePython()
         let dir = try makeTempDir()
         let rclone = try FakeRclone.make(in: dir)
@@ -64,6 +66,8 @@ final class SessionManagerTests: DebugTestCase {
         let manager = SessionManager(
             store: store, keychain: keychain, mounter: mounter,
             logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone.binary,
+            preferences: preferences ?? UserPreferences(),
+            finderProgressFactory: finderProgressFactory ?? SessionFinderProgressFactory(),
             controlClient: { spawned in
                 controlClient ?? URLSessionRcloneControlClient(port: spawned.rcPort, user: spawned.rcUser, password: spawned.rcPassword)
             }
@@ -836,4 +840,120 @@ extension SessionManagerTests {
         try await f.manager.unmount(remoteID: remote.id)
     }
 
+}
+
+@MainActor
+private final class SessionFinderProgressFactory: FinderProgressFactory {
+    final class Handle: FinderProgressHandle {
+        var completed: Int64 = 0
+        var finishCount = 0
+        func update(completed: Int64, total: Int64) { self.completed = completed }
+        func finish() { finishCount += 1 }
+    }
+    var urls: [URL] = []
+    var handles: [Handle] = []
+    func makeHandle(for fileURL: URL, total: Int64) -> FinderProgressHandle {
+        let handle = Handle()
+        urls.append(fileURL)
+        handles.append(handle)
+        return handle
+    }
+}
+
+extension SessionManagerTests {
+    private func finderPreferences() -> UserPreferences {
+        let name = "rmount.finder-session-tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+        return UserPreferences(defaults: defaults)
+    }
+
+    func testFinderProgressFollowsMonitorAndClearsOnUnmount() async throws {
+        let client = SessionControlClient()
+        let factory = SessionFinderProgressFactory()
+        let f = try makeFixture(controlClient: client, finderProgressFactory: factory,
+                                preferences: finderPreferences())
+        let remote = makeRemote(backend: sftpBackend())
+        try f.manager.add(remote)
+        let session = f.manager.sessions[0]
+        session.mountpoint = f.dir.appendingPathComponent("mount space").path
+        f.manager.startUploadMonitor(remoteID: remote.id, client: client)
+        try await waitForUploads { factory.handles.count == 1 }
+        XCTAssertEqual(factory.urls, [URL(fileURLWithPath: session.mountpoint!).appendingPathComponent("pending")])
+        XCTAssertEqual(factory.handles[0].completed, 0)
+        await client.setQueue(VFSQueue(queue: [.init(name: "pending", size: 42, uploading: true)]))
+        await client.setStats(RcloneStats(transferring: [.init(name: "pending", bytes: 17, size: 42)]))
+        await f.manager.refreshUploadStatus(remoteID: remote.id)
+        XCTAssertEqual(factory.handles[0].completed, 17)
+        try await f.manager.unmount(remoteID: remote.id)
+        XCTAssertEqual(factory.handles[0].finishCount, 1)
+    }
+
+    func testFinderProgressIgnoresCallbackFromStoppedMonitor() async throws {
+        let oldClient = SessionControlClient()
+        let newClient = SessionControlClient()
+        await newClient.setQueue(VFSQueue(queue: [.init(name: "new", size: 100)]))
+        let factory = SessionFinderProgressFactory()
+        let f = try makeFixture(finderProgressFactory: factory, preferences: finderPreferences())
+        let remote = makeRemote(backend: sftpBackend())
+        try f.manager.add(remote)
+        f.manager.sessions[0].mountpoint = "/Volumes/test"
+        f.manager.startUploadMonitor(remoteID: remote.id, client: oldClient)
+        try await waitForUploads { factory.handles.count == 1 }
+        await oldClient.setQueue(VFSQueue(queue: [.init(name: "obsolete", size: 100)]))
+        await oldClient.delayNext()
+        let refresh = Task { await f.manager.refreshUploadStatus(remoteID: remote.id) }
+        try await waitForUploads { await oldClient.waiting != nil }
+        f.manager.startUploadMonitor(remoteID: remote.id, client: newClient)
+        try await waitForUploads { factory.handles.count == 2 }
+        await oldClient.release()
+        await refresh.value
+        XCTAssertEqual(factory.urls.map(\.lastPathComponent), ["pending", "new"])
+        XCTAssertEqual(factory.handles[0].finishCount, 1)
+        XCTAssertEqual(factory.handles[1].finishCount, 0)
+    }
+
+    func testFinderPreferenceImmediatelyClearsAndRepublishesCurrentTransfers() async throws {
+        let preferences = finderPreferences()
+        let client = SessionControlClient()
+        let factory = SessionFinderProgressFactory()
+        let f = try makeFixture(finderProgressFactory: factory, preferences: preferences)
+        let remote = makeRemote(backend: sftpBackend())
+        try f.manager.add(remote)
+        f.manager.sessions[0].mountpoint = "/Volumes/test"
+        f.manager.startUploadMonitor(remoteID: remote.id, client: client)
+        try await waitForUploads { factory.handles.count == 1 }
+        preferences.showFinderUploadProgress = false
+        XCTAssertEqual(factory.handles[0].finishCount, 1)
+        await f.manager.refreshUploadStatus(remoteID: remote.id)
+        XCTAssertEqual(factory.handles.count, 1)
+        preferences.showFinderUploadProgress = true
+        XCTAssertEqual(factory.handles.count, 2)
+        // Background writes also marshal publication changes onto the main actor.
+        await Task.detached { preferences.showFinderUploadProgress = false }.value
+        try await waitForUploads { factory.handles[1].finishCount == 1 }
+    }
+
+    func testShutdownStopsFinderProgressAndDiscardsInflightCallback() async throws {
+        let client = SessionControlClient()
+        let factory = SessionFinderProgressFactory()
+        let f = try makeFixture(finderProgressFactory: factory, preferences: finderPreferences())
+        let remote = makeRemote(backend: sftpBackend())
+        try f.manager.add(remote)
+        // An idle session can still have a monitor during teardown; shutdown must
+        // invalidate it even though it is not in the mounted-session loop.
+        f.manager.sessions[0].mountpoint = "/Volumes/test"
+        f.manager.startUploadMonitor(remoteID: remote.id, client: client)
+        try await waitForUploads { factory.handles.count == 1 }
+        await client.setQueue(VFSQueue(queue: [.init(name: "late", size: 100)]))
+        await client.delayNext()
+        let refresh = Task { await f.manager.refreshUploadStatus(remoteID: remote.id) }
+        try await waitForUploads { await client.waiting != nil }
+        f.manager.shutdownAll()
+        XCTAssertEqual(factory.handles[0].finishCount, 1)
+        await client.release()
+        await refresh.value
+        XCTAssertEqual(factory.handles.count, 1)
+        XCTAssertNil(f.manager.uploadStatus[remote.id])
+    }
 }

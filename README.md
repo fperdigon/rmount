@@ -50,6 +50,7 @@ so nothing needs to be installed in the kernel.
 - **Per-remote performance settings**: Energy saving / Responsive updates, cache mode, read-ahead, buffer size, write-back delay.
 - **Live updates**: changes on the server show up in seconds in Responsive mode, or within a few minutes in the default Energy saving mode.
 - **Upload status**: open Transfers from the menu to see per-file upload progress, bytes left, speed and estimated time remaining, with a warning before quitting, unmounting or updating.
+- **Finder upload progress**: a small progress circle in Finder's list view follows real uploads, including queued files; enabled by default in General settings.
 - **Auto-mount at login.**
 - **Passwords stored in your Keychain**, never on disk in plaintext.
 
