@@ -34,7 +34,7 @@ private final class LocalSSHD {
         self.process = process
     }
 
-    func stop() { process.terminate() }
+    func stop() { process.debugTerminate() }
 
     static func start(in dir: URL) throws -> LocalSSHD {
         let sshd = "/usr/sbin/sshd"
@@ -47,8 +47,8 @@ private final class LocalSSHD {
         let gen = Process()
         gen.executableURL = URL(fileURLWithPath: keygen)
         gen.arguments = ["-q", "-t", "ed25519", "-N", "", "-f", hostKey]
-        try gen.run()
-        gen.waitUntilExit()
+        try gen.debugRun()
+        gen.debugWaitUntilExit()
         guard gen.terminationStatus == 0 else { throw XCTSkip("could not generate host key") }
 
         for _ in 0..<5 {
@@ -59,11 +59,12 @@ private final class LocalSSHD {
                            "-o", "ListenAddress=127.0.0.1", "-o", "PidFile=none", "-o", "UsePAM=no"]
             p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice
-            do { try p.run() } catch { continue }
+            TestDebug.log("sshd bind attempt address=127.0.0.1:\(port)")
+            do { try p.debugRun() } catch { continue }
             if waitForPort(port, alive: { p.isRunning }) {
                 return LocalSSHD(port: port, process: p)
             }
-            p.terminate()
+            p.debugTerminate()
         }
         throw XCTSkip("could not start a local sshd")
     }
@@ -90,16 +91,16 @@ private final class LocalSSHD {
 }
 
 @MainActor
-final class HostKeyVerifierTests: XCTestCase {
+final class HostKeyVerifierTests: DebugTestCase {
     private func knownHostsFile() throws -> (dir: URL, path: String) {
         let dir = try makeTempDir()
-        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        addDebugTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         return (dir, dir.appendingPathComponent("known_hosts").path)
     }
 
     private func startSSHD(in dir: URL) throws -> LocalSSHD {
         let server = try LocalSSHD.start(in: dir)
-        addTeardownBlock { server.stop() }
+        addDebugTeardownBlock { server.stop() }
         return server
     }
 

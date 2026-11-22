@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class KeychainServiceTests: XCTestCase {
+final class KeychainServiceTests: DebugTestCase {
     let svc = KeychainService(serviceName: "ai.rmount.test")
     let id = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
 
@@ -32,7 +32,7 @@ final class KeychainServiceTests: XCTestCase {
     }
 }
 
-final class KeychainOptionKindTests: XCTestCase {
+final class KeychainOptionKindTests: DebugTestCase {
     func testOptionSecretsAreStoredPerNameAndRemote() throws {
         let svc = KeychainService(serviceName: "rmount.tests.\(UUID().uuidString)")
         let id = UUID()

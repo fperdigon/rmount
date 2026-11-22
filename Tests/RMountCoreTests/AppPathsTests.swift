@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class AppPathsTests: XCTestCase {
+final class AppPathsTests: DebugTestCase {
     func testApplicationSupportCreatesBundleDirectory() throws {
         let id = "com.rmount.tests.\(UUID().uuidString)"
         let dir = try AppPaths.applicationSupport(bundleID: id)

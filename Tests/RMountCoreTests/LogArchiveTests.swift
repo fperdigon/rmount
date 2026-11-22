@@ -1,13 +1,13 @@
 import XCTest
 @testable import RMountCore
 
-final class LogArchiveTests: XCTestCase {
+final class LogArchiveTests: DebugTestCase {
     private let now = ISO8601DateFormatter().date(from: "2026-11-11T03:04:05Z")!
     private let id = "12345678-1234-1234-1234-123456789ABC"
 
     private func fixture() throws -> URL {
         let dir = try makeTempDir()
-        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        addDebugTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         return dir
     }
 

@@ -52,7 +52,7 @@ private actor FakeControlClient: RcloneControlClient {
     func setFails() { fails = true }
 }
 
-final class UploadMonitorTests: XCTestCase {
+final class UploadMonitorTests: DebugTestCase {
     func testQueueParsesEmptyMissingAndNullQueues() throws {
         for json in ["{}", "{\"queue\":null}", "{\"queue\":[]}"] {
             let queue = try JSONDecoder().decode(VFSQueue.self, from: Data(json.utf8))

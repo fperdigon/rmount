@@ -2,7 +2,7 @@ import XCTest
 @testable import RMountCore
 
 @MainActor
-final class ClearErrorTests: XCTestCase {
+final class ClearErrorTests: DebugTestCase {
     private var dir: URL!
 
     override func setUpWithError() throws {

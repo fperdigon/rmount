@@ -6,7 +6,7 @@ import XCTest
 /// Backblaze B2 and Google Cloud Storage have no usable emulator, so their tests need test
 /// accounts (see `NativeCloudAccountTests`) and skip without them.
 @MainActor
-final class AzureIntegrationTests: XCTestCase {
+final class AzureIntegrationTests: DebugTestCase {
     private struct Env { let account, key, endpoint, container: String }
 
     private func env() throws -> Env {
@@ -36,9 +36,9 @@ final class AzureIntegrationTests: XCTestCase {
         let out = Pipe()
         p.standardOutput = out
         p.standardError = Pipe()
-        guard (try? p.run()) != nil else { return nil }
+        guard (try? p.debugRun()) != nil else { return nil }
         let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+        p.debugWaitUntilExit()
         return p.terminationStatus == 0 ? String(data: data, encoding: .utf8) : nil
     }
 
@@ -89,7 +89,7 @@ final class AzureIntegrationTests: XCTestCase {
 /// Real Backblaze B2 and Google Cloud Storage accounts. Skipped without the CI secrets
 /// RMOUNT_IT_B2_ACCOUNT/_KEY/_BUCKET and RMOUNT_IT_GCS_CREDENTIALS/_BUCKET.
 @MainActor
-final class NativeCloudAccountTests: XCTestCase {
+final class NativeCloudAccountTests: DebugTestCase {
     private func rcloneCat(_ target: String, _ env: [String: String]) -> String? {
         let p = Process()
         p.executableURL = try? RcloneBinary.resolve()
@@ -98,9 +98,9 @@ final class NativeCloudAccountTests: XCTestCase {
         let out = Pipe()
         p.standardOutput = out
         p.standardError = Pipe()
-        guard (try? p.run()) != nil else { return nil }
+        guard (try? p.debugRun()) != nil else { return nil }
         let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+        p.debugWaitUntilExit()
         return p.terminationStatus == 0 ? String(data: data, encoding: .utf8) : nil
     }
 

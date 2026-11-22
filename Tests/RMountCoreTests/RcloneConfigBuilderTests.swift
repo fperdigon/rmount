@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class RcloneConfigBuilderTests: XCTestCase {
+final class RcloneConfigBuilderTests: DebugTestCase {
     func testSFTPPasswordAuthBasic() throws {
         let r = Remote(
             id: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
@@ -75,7 +75,7 @@ final class RcloneConfigBuilderTests: XCTestCase {
         p.executableURL = rclone
         p.arguments = ["reveal", obscured]
         let out = Pipe(); p.standardOutput = out
-        try p.run(); p.waitUntilExit()
+        try p.debugRun(); p.debugWaitUntilExit()
         let revealed = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(revealed, "s3cret-pass")

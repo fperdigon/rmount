@@ -3,7 +3,7 @@ import Darwin
 @testable import RMountCore
 
 /// Exercises only private localhost servers and temporary storage; no filesystem mount is made.
-final class UploadQueueIntegrationTests: XCTestCase {
+final class UploadQueueIntegrationTests: DebugTestCase {
     private func fixture() throws -> (RcloneProcess, URL) {
         let path = ProcessInfo.processInfo.environment["RMOUNT_IT_RCLONE"]
             ?? "/Applications/rmount.app/Contents/Resources/rclone"
@@ -13,7 +13,7 @@ final class UploadQueueIntegrationTests: XCTestCase {
         try requireLocalhost()
         let dir = try makeTempDir()
         try FileManager.default.createDirectory(at: dir.appendingPathComponent("backend"), withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        addDebugTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         return (RcloneProcess(binary: URL(fileURLWithPath: path), logFile: dir.appendingPathComponent("rclone.log")), dir)
     }
 
@@ -29,18 +29,22 @@ final class UploadQueueIntegrationTests: XCTestCase {
                 Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        if result != 0, errno == EPERM || errno == EACCES {
+        let bindError = errno
+        TestDebug.log("bind address=127.0.0.1:0 result=\(result) errno=\(bindError)")
+        if result != 0, bindError == EPERM || bindError == EACCES {
             throw XCTSkip("Sandbox does not permit binding private localhost test servers")
         }
         XCTAssertEqual(result, 0, "Could not bind a private localhost test server")
     }
 
     private func manage(_ spawned: RcloneProcess.Spawned) {
-        addTeardownBlock {
+        TestDebug.spawned(spawned)
+        addDebugTeardownBlock {
             // Only the process this test started is ever stopped.
             if spawned.process.isRunning {
-                spawned.process.terminate()
-                spawned.process.waitUntilExit()
+                // Not waitUntilExit(): Foundation can miss the wakeup after terminate() and block forever
+                // even though the child is gone (see TestSupport.stopAndReap).
+                spawned.process.stopAndReap()
             }
             try? FileManager.default.removeItem(at: spawned.configURL.deletingLastPathComponent())
         }

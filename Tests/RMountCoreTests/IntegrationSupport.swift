@@ -58,7 +58,9 @@ enum IntegrationHarness {
                             backend: backend, mountProtocol: proto, autoMount: false, readOnly: readOnly)
         try manager.add(remote, sftpSecrets: secrets.sftp, s3Secrets: secrets.s3,
                         ftpSecrets: secrets.ftp, optionSecrets: secrets.options)
-        test.addTeardownBlock { @MainActor in
+        test.addDebugTeardownBlock { @MainActor in
+            TestDebug.log("teardown main-actor body start")
+            defer { TestDebug.log("teardown main-actor body finish") }
             manager.shutdownAll()
             try? manager.delete(remote.id)
             try? FileManager.default.removeItem(at: dir)
@@ -122,7 +124,7 @@ extension IntegrationHarness {
         _ test: XCTestCase, backend: Backend, draft: SessionManager.DraftSecrets
     ) async throws -> ConnectionTestResult {
         let dir = try makeTempDir()
-        test.addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        test.addDebugTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         let manager = SessionManager(
             store: RemoteStore(directory: dir),
             keychain: KeychainService(serviceName: "rmount.it.\(UUID().uuidString)"),

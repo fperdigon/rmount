@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class MountURLTests: XCTestCase {
+final class MountURLTests: DebugTestCase {
     func testBasicURL() {
         let url = MountURL.webdav(host: "127.0.0.1", port: 8421, user: "u", password: "p")
         XCTAssertEqual(url, "http://u:p@127.0.0.1:8421/")

@@ -14,6 +14,13 @@ struct FakeRclone {
         #!/usr/bin/env python3
         import os, socket, sys, time
         args = sys.argv[1:]
+        # The fake's stderr is part of what tests assert on, so debug lines go ONLY to the debug file.
+        debug_file = os.environ.get("RMOUNT_TEST_DEBUG_FILE") if os.environ.get("RMOUNT_TEST_DEBUG") == "1" else None
+        def debug_log(event):
+            if debug_file:
+                with open(debug_file, "a") as f:
+                    f.write("[RMOUNT_TEST_DEBUG] time=%.6f pid=%d thread=main %s\\n" % (time.time(), os.getpid(), event))
+        debug_log("fake-rclone start (arguments and environment redacted)")
         if args and args[0] == "obscure":
             print("OBS-" + args[1])
             sys.exit(0)
@@ -68,7 +75,9 @@ struct FakeRclone {
             host, port = args[args.index("--addr") + 1].rsplit(":", 1)
             s = socket.socket()
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            debug_log("bind before address=%s:%s" % (host, port))
             s.bind((host, int(port)))
+            debug_log("bind after address=%s:%s" % (host, port))
             s.listen(5)
             while True:
                 c, _ = s.accept()
@@ -140,4 +149,150 @@ func driveBackend(remotePath: String = "", clientID: String = "") -> Backend {
     .rclone(BackendDescriptor.googleDrive.makeConfig(
         values: ["scope": "drive", "token": "", "client_id": clientID, "client_secret": ""],
         remotePath: remotePath))
+}
+
+/// Diagnostic output only: never dump environments, arbitrary argument values, or errors.
+/// In particular, shell bodies and rclone obscure/reveal operands can contain secrets.
+enum TestDebug {
+    static let enabled = ProcessInfo.processInfo.environment["RMOUNT_TEST_DEBUG"] == "1"
+    private static let lock = NSLock()
+
+    static func log(_ message: @autoclosure () -> String) {
+        guard enabled else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[RMOUNT_TEST_DEBUG] \(timestamp) uptime=\(ProcessInfo.processInfo.systemUptime) pid=\(ProcessInfo.processInfo.processIdentifier) thread=\(Thread.isMainThread ? "main" : "background") \(message())\n"
+        FileHandle.standardError.write(Data(line.utf8))
+        // `swift test` relays the test process's stderr and can hold lines back when the run stalls;
+        // RMOUNT_TEST_DEBUG_FILE=<path> appends each line straight to a file so nothing is lost.
+        if let path = ProcessInfo.processInfo.environment["RMOUNT_TEST_DEBUG_FILE"] {
+            let fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+            if fd >= 0 { _ = line.withCString { write(fd, $0, strlen($0)) }; close(fd) }
+        }
+    }
+
+    /// Keep known command/option names; redact every operand, including addresses.
+    /// An allowlist also covers inline credentials, script bodies, and unknown options.
+    static func safeArguments(_ arguments: [String]) -> [String] {
+        let commands: Set<String> = ["serve", "webdav", "nfs", "obscure", "reveal", "create"]
+        let options: Set<String> = [
+            "--addr", "--rc", "--rc-addr", "--config", "--user", "--pass", "--baseurl",
+            "--cache-dir", "--bwlimit", "--vfs-cache-mode", "--vfs-write-back",
+            "--vfs-cache-max-size", "--vfs-cache-max-age", "--vfs-read-chunk-size",
+            "--vfs-read-chunk-size-limit", "--buffer-size", "--dir-cache-time",
+            "--vfs-fast-fingerprint", "--poll-interval", "--read-only",
+            "-q", "-t", "-N", "-f", "-D", "-h", "-p", "-o", "-c",
+            "-volname", "-srcfolder", "-fs", "-size", "-format", "-ov"
+        ]
+        var expectsValue = false
+        let switches: Set<String> = ["--rc", "--vfs-fast-fingerprint", "--read-only", "-q", "-D", "-ov"]
+        return arguments.enumerated().map { index, argument in
+            if expectsValue {
+                expectsValue = false
+                return "<redacted>"
+            }
+            if index == 0, commands.contains(argument) {
+                expectsValue = argument == "obscure" || argument == "reveal"
+                return argument
+            }
+            if index == 1, arguments.first == "serve", ["webdav", "nfs"].contains(argument) {
+                return argument
+            }
+            if options.contains(argument) {
+                expectsValue = !switches.contains(argument)
+                return argument
+            }
+            return "<redacted>"
+        }
+    }
+
+    static func process(_ event: String, _ process: Process) {
+        log("\(event) child=\(process.processIdentifier) path=\(String(reflecting: process.executableURL?.path ?? "?")) args=\(safeArguments(process.arguments ?? []))")
+    }
+
+    static func spawned(_ spawned: RcloneProcess.Spawned) {
+        guard enabled else { return }
+        process("spawned", spawned.process)
+        log("ports child=\(spawned.process.processIdentifier) serve=127.0.0.1:\(spawned.port) rc=127.0.0.1:\(spawned.rcPort)")
+    }
+}
+
+/// Use the same XCTest invocation, with a pair of diagnostic boundaries when enabled.
+class DebugTestCase: XCTestCase {
+    override func invokeTest() {
+        TestDebug.log("test start \(name)")
+        defer { TestDebug.log("test finish \(name)") }
+        super.invokeTest()
+    }
+}
+
+extension XCTestCase {
+    func addDebugTeardownBlock(file: StaticString = #filePath, line: UInt = #line,
+                               _ block: @escaping () throws -> Void) {
+        guard TestDebug.enabled else { addTeardownBlock(block); return }
+        let label = "\(name) \(URL(fileURLWithPath: String(describing: file)).lastPathComponent):\(line)"
+        addTeardownBlock {
+            TestDebug.log("teardown start \(label)")
+            defer { TestDebug.log("teardown finish \(label)") }
+            try block()
+        }
+    }
+
+    func addDebugTeardownBlock(file: StaticString = #filePath, line: UInt = #line,
+                               _ block: @escaping @Sendable () async throws -> Void) {
+        guard TestDebug.enabled else { addTeardownBlock(block); return }
+        let label = "\(name) \(URL(fileURLWithPath: String(describing: file)).lastPathComponent):\(line)"
+        addTeardownBlock {
+            TestDebug.log("teardown start \(label)")
+            defer { TestDebug.log("teardown finish \(label)") }
+            try await block()
+        }
+    }
+}
+
+extension Process {
+    func debugRun() throws {
+        TestDebug.process("run before", self)
+        defer { TestDebug.process("run after", self) }
+        try run()
+    }
+
+    func debugTerminate() {
+        TestDebug.process("terminate before", self)
+        defer { TestDebug.process("terminate after", self) }
+        terminate()
+    }
+
+    func debugWaitUntilExit() {
+        TestDebug.process("waitUntilExit before", self)
+        defer { TestDebug.process("waitUntilExit after", self) }
+        if TestDebug.enabled {
+            // Watchdog: if the wait is still blocked after 5 s, record what Foundation and the OS say.
+            let pid = processIdentifier
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak self] in
+                let alive = kill(pid, 0) == 0
+                TestDebug.log("waitUntilExit STILL BLOCKED after 5s pid=\(pid) foundationIsRunning=\(self?.isRunning ?? false) osProcessExists=\(alive) errno=\(errno)")
+            }
+        }
+        waitUntilExit()
+    }
+}
+
+extension Process {
+    /// Terminates the child and waits (bounded) until Foundation has observed its exit, so a test never
+    /// drops a still-running `Process`. Uses polling instead of `waitUntilExit()`, which can block forever.
+    func stopAndReap(timeout: TimeInterval = 10) {
+        guard isRunning else { return }
+        TestDebug.process("stopAndReap terminate", self)
+        terminate()
+        let deadline = Date().addingTimeInterval(timeout)
+        while isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+        if isRunning {
+            kill(processIdentifier, SIGKILL)
+            let killDeadline = Date().addingTimeInterval(5)
+            while isRunning && Date() < killDeadline { Thread.sleep(forTimeInterval: 0.02) }
+        }
+        TestDebug.log("stopAndReap done pid=\(processIdentifier) stillRunning=\(isRunning)")
+    }
 }

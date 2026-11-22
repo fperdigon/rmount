@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class UpdateInstallerTests: XCTestCase {
+final class UpdateInstallerTests: DebugTestCase {
     // MARK: helpers
 
     /// A minimal fake bundle: <dir>/<name>/Contents/{Info.plist,MacOS/<exe>} where the exe holds `marker`.
@@ -31,16 +31,16 @@ final class UpdateInstallerTests: XCTestCase {
         p.standardOutput = Pipe()
         let err = Pipe()
         p.standardError = err
-        try p.run()
+        try p.debugRun()
         let msg = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        p.waitUntilExit()
+        p.debugWaitUntilExit()
         guard p.terminationStatus == 0 else { throw XCTSkip("hdiutil unavailable here: \(msg)") }
         return dmg
     }
 
     private func tempDir() throws -> URL {
         let dir = try makeTempDir()
-        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        addDebugTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         return dir
     }
 
