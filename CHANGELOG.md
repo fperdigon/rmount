@@ -17,6 +17,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The Transfers window scrolls long upload lists within bounded remote sections, keeps the remote filter while open, and shows active upload counts in the remote picker.
 - A remote whose sign-in has expired (for example Google Drive) is no longer retried every 5 minutes forever; it stops and asks you to sign in again.
 
 ### Added
