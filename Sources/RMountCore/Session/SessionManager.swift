@@ -10,6 +10,9 @@ public final class SessionManager: ObservableObject {
     private var uploadMonitors: [UUID: UploadMonitor] = [:]
     private var uploadGenerations: [UUID: UUID] = [:]
     private let controlClient: (RcloneProcess.Spawned) -> RcloneControlClient
+    private let finderProgressPublisher: FinderProgressPublisher
+    private let preferences: UserPreferences
+    private var finderProgressPreferenceCancellable: AnyCancellable?
 
     private let store: RemoteStore
     private let keychain: KeychainService
@@ -31,6 +34,8 @@ public final class SessionManager: ObservableObject {
         logsDir: URL,
         rcloneBinary: URL,
         hostKeyVerifier: HostKeyVerifier? = nil,
+        preferences: UserPreferences = UserPreferences(),
+        finderProgressFactory: FinderProgressFactory? = nil,
         controlClient: @escaping (RcloneProcess.Spawned) -> RcloneControlClient = {
             URLSessionRcloneControlClient(port: $0.rcPort, user: $0.rcUser, password: $0.rcPassword)
         }
@@ -42,7 +47,30 @@ public final class SessionManager: ObservableObject {
         self.rcloneBinary = rcloneBinary
         self.hostKeyVerifier = hostKeyVerifier
         self.controlClient = controlClient
+        self.preferences = preferences
+        self.finderProgressPublisher = FinderProgressPublisher(
+            factory: finderProgressFactory, isEnabled: preferences.showFinderUploadProgress)
+        finderProgressPreferenceCancellable = NotificationCenter.default
+            .publisher(for: UserPreferences.showFinderUploadProgressDidChange)
+            .sink { [weak self] _ in
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated { self?.updateFinderProgressPreference() }
+                } else {
+                    Task { @MainActor [weak self] in self?.updateFinderProgressPreference() }
+                }
+            }
         try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+    }
+
+    private func updateFinderProgressPreference() {
+        let enabled = preferences.showFinderUploadProgress
+        guard finderProgressPublisher.isEnabled != enabled else { return }
+        finderProgressPublisher.isEnabled = enabled
+        for (remoteID, status) in uploadStatus {
+            finderProgressPublisher.sync(remoteID: remoteID,
+                                         mountpoint: sessions.first(where: { $0.id == remoteID })?.mountpoint,
+                                         status: status)
+        }
     }
 
     public func pendingUploads() -> [(remoteName: String, status: UploadStatus)] {
@@ -59,6 +87,10 @@ public final class SessionManager: ObservableObject {
         uploadMonitors[remoteID] = UploadMonitor(client: client) { [weak self] status in
             guard let self, self.uploadGenerations[remoteID] == generation else { return }
             self.uploadStatus[remoteID] = status
+            self.finderProgressPublisher.sync(
+                remoteID: remoteID,
+                mountpoint: self.sessions.first(where: { $0.id == remoteID })?.mountpoint,
+                status: status)
         }
     }
 
@@ -76,6 +108,7 @@ public final class SessionManager: ObservableObject {
         uploadGenerations[remoteID] = nil
         uploadMonitors.removeValue(forKey: remoteID)?.stop()
         uploadStatus[remoteID] = nil
+        finderProgressPublisher.clear(remoteID: remoteID)
     }
 
     public func reload() throws {
@@ -560,6 +593,7 @@ public final class SessionManager: ObservableObject {
             session.transition(to: .mounted(at: mountpoint))
             startUploadMonitor(remoteID: remoteID, client: controlClient(spawned))
         } catch {
+            stopUploadMonitor(remoteID: remoteID)
             if let url = ephemeralKeyURL { try? FileManager.default.removeItem(at: url) }
             if let proc = spawnedProcess, proc.isRunning { proc.terminate() }
             if let cfg = spawnedConfig { try? FileManager.default.removeItem(at: cfg.deletingLastPathComponent()) }
@@ -669,6 +703,10 @@ public final class SessionManager: ObservableObject {
     public func shutdownAll() {
         for (_, task) in retryTasks { task.cancel() }
         retryTasks.removeAll()
+        // Invalidate every callback before unmounting: even a busy volume must not
+        // republish Finder progress while the app is quitting.
+        for remoteID in Array(uploadMonitors.keys) { stopUploadMonitor(remoteID: remoteID) }
+        finderProgressPublisher.clearAll()
         for session in sessions {
             if case .mounted = session.status {
                 try? unmountBlocking(remoteID: session.id)

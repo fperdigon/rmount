@@ -4,6 +4,8 @@ import Foundation
 public final class UserPreferences {
     private let defaults: UserDefaults
 
+    public static let showFinderUploadProgressDidChange = Notification.Name("rmount.showFinderUploadProgressDidChange")
+
     /// `legacyDomains` are the preference domains of the old bundle ids (`ai.macsh`). Values the
     /// user set there, under the old `macsh.*` key names, are copied once to the `rmount.*` keys;
     /// the old values stay where they are, so an older version keeps working.
@@ -31,6 +33,7 @@ public final class UserPreferences {
     private static var autoCheckUpdatesKey: String { key(autoCheckUpdatesName) }
     private static var lastUpdateCheckKey: String { key(lastUpdateCheckName) }
     private static var skippedUpdateTagKey: String { key(skippedUpdateTagName) }
+    private static var showFinderUploadProgressKey: String { key("showFinderUploadProgress") }
 
     private func migrateLegacyValues(from legacyDomains: [String]) {
         guard defaults.object(forKey: Self.migratedKey) == nil else { return }
@@ -91,6 +94,18 @@ public final class UserPreferences {
     public var autoCheckUpdates: Bool {
         get { defaults.object(forKey: Self.autoCheckUpdatesKey) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Self.autoCheckUpdatesKey) }
+    }
+
+    /// Publish real upload progress for Finder's list view. On by default.
+    public var showFinderUploadProgress: Bool {
+        get { defaults.object(forKey: Self.showFinderUploadProgressKey) as? Bool ?? true }
+        set {
+            let changed = newValue != showFinderUploadProgress
+            defaults.set(newValue, forKey: Self.showFinderUploadProgressKey)
+            if changed {
+                NotificationCenter.default.post(name: Self.showFinderUploadProgressDidChange, object: self)
+            }
+        }
     }
 
     public var lastUpdateCheck: Date? {

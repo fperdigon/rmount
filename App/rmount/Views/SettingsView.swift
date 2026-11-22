@@ -119,12 +119,14 @@ private struct GeneralPane: View {
     let prefs: UserPreferences
     @State private var launchAtLogin: Bool
     @State private var defaultProtocol: MountProtocol
+    @State private var showFinderUploadProgress: Bool
 
     init(loginItemManager: LoginItemManager, prefs: UserPreferences) {
         self.loginItemManager = loginItemManager
         self.prefs = prefs
         _launchAtLogin = State(initialValue: loginItemManager.isEnabled)
         _defaultProtocol = State(initialValue: prefs.defaultProtocol)
+        _showFinderUploadProgress = State(initialValue: prefs.showFinderUploadProgress)
     }
 
     var body: some View {
@@ -148,6 +150,14 @@ private struct GeneralPane: View {
                     .labelsHidden()
                     .frame(maxWidth: 200)
                     .onChange(of: defaultProtocol) { _, p in prefs.defaultProtocol = p }
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Show upload progress in Finder (list view)", isOn: $showFinderUploadProgress)
+                        .toggleStyle(.checkbox)
+                        .onChange(of: showFinderUploadProgress) { _, value in prefs.showFinderUploadProgress = value }
+                    Text("Finder shows a small progress circle next to files that are still uploading. Visible in list view only.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
