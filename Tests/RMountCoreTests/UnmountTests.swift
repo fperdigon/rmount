@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class UnmountTests: XCTestCase {
+final class UnmountTests: DebugTestCase {
     private var dir: URL!
 
     override func setUpWithError() throws {

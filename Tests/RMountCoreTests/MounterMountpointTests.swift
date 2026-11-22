@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class MounterMountpointTests: XCTestCase {
+final class MounterMountpointTests: DebugTestCase {
     private var base: URL!
 
     override func setUpWithError() throws {

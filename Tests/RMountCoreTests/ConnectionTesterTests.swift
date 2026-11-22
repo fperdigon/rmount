@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class ConnectionTesterExplainTests: XCTestCase {
+final class ConnectionTesterExplainTests: DebugTestCase {
     private func explain(_ s: String) -> String { ConnectionTester.explain(stderr: s) }
 
     func testAuthenticationFailuresFromEachProtocol() {
@@ -43,11 +43,11 @@ final class ConnectionTesterExplainTests: XCTestCase {
     }
 }
 
-final class ConnectionTesterRunTests: XCTestCase {
+final class ConnectionTesterRunTests: DebugTestCase {
     private func make() throws -> (FakeRclone, URL) {
         try FakeRclone.requirePython()
         let dir = try makeTempDir()
-        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        addDebugTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         return (try FakeRclone.make(in: dir), dir)
     }
 

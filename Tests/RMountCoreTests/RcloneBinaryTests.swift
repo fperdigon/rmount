@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class RcloneBinaryTests: XCTestCase {
+final class RcloneBinaryTests: DebugTestCase {
     private var suiteName: String!
     private var defaults: UserDefaults!
 

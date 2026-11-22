@@ -3,7 +3,7 @@ import XCTest
 
 /// Real Nextcloud (started by scripts/ci/start-nextcloud.sh) through the WebDAV backend.
 @MainActor
-final class NextcloudIntegrationTests: XCTestCase {
+final class NextcloudIntegrationTests: DebugTestCase {
     private func run(_ proto: MountProtocol) async throws {
         let e = try IntegrationEnv.require("RMOUNT_IT_NEXTCLOUD_URL", "RMOUNT_IT_NEXTCLOUD_USER", "RMOUNT_IT_NEXTCLOUD_PASS")
         let (url, user, pass) = (e["RMOUNT_IT_NEXTCLOUD_URL"]!, e["RMOUNT_IT_NEXTCLOUD_USER"]!, e["RMOUNT_IT_NEXTCLOUD_PASS"]!)

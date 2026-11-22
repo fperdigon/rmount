@@ -2,7 +2,7 @@ import XCTest
 @testable import RMountCore
 
 /// The old macsh names stay readable as aliases of the RMount ones (see LegacyNames).
-final class LegacyAliasTests: XCTestCase {
+final class LegacyAliasTests: DebugTestCase {
     // MARK: names
 
     func testLegacyBundleIDsKeepTheFlavorSuffix() {
@@ -126,7 +126,7 @@ final class LegacyAliasTests: XCTestCase {
     private func suite() -> (name: String, defaults: UserDefaults) {
         let name = "rmount.tests.\(UUID().uuidString)"
         let d = UserDefaults(suiteName: name)!
-        addTeardownBlock { d.removePersistentDomain(forName: name) }
+        addDebugTeardownBlock { d.removePersistentDomain(forName: name) }
         return (name, d)
     }
 

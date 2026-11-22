@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class BackendTests: XCTestCase {
+final class BackendTests: DebugTestCase {
     func testRcloneProviderMapping() {
         XCTAssertEqual(S3Provider.aws.rcloneProvider, "AWS")
         XCTAssertEqual(S3Provider.cloudflareR2.rcloneProvider, "Cloudflare")

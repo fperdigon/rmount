@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class TransferTuningTests: XCTestCase {
+final class TransferTuningTests: DebugTestCase {
     func testNFSDefaultsUseReadCacheAndShortWriteBack() {
         let t = TransferTuning.defaults(for: .nfs)
         XCTAssertEqual(t.cacheMode, .full)

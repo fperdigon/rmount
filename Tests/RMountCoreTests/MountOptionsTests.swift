@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class MountOptionsTests: XCTestCase {
+final class MountOptionsTests: DebugTestCase {
     func testBandwidthAcceptsRcloneFormats() {
         for ok in ["", "  ", "1M", "512k", "0.5M", "10", "1G", "10M:1M", "512k:0", "2.5M:100k"] {
             XCTAssertNil(MountOptions.validateBandwidth(ok), ok)

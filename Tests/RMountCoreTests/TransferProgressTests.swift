@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class TransferProgressTests: XCTestCase {
+final class TransferProgressTests: DebugTestCase {
     func testTolerantStatsDecoding() throws {
         for json in ["{}", "{\"transferring\":null}", "{\"transferring\":false}", "{\"transferring\":[]}"] {
             XCTAssertEqual(try JSONDecoder().decode(RcloneStats.self, from: Data(json.utf8)).transferring, [])

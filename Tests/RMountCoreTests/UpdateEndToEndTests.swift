@@ -3,7 +3,7 @@ import XCTest
 
 /// The whole update path against a local stand-in for GitHub: real HTTP requests for the release
 /// JSON and the DMG, real checksum, real hdiutil mount and app swap. Skipped without python3.
-final class UpdateEndToEndTests: XCTestCase {
+final class UpdateEndToEndTests: DebugTestCase {
     private static let serverScript = """
     import http.server, os, sys
     root = sys.argv[1]
@@ -55,17 +55,18 @@ final class UpdateEndToEndTests: XCTestCase {
         let out = Pipe()
         p.standardOutput = out
         p.standardError = Pipe()
-        try p.run()
-        addTeardownBlock { p.terminate(); try? FileManager.default.removeItem(at: script) }
+        try p.debugRun()
+        addDebugTeardownBlock { p.debugTerminate(); try? FileManager.default.removeItem(at: script) }
         let line = String(decoding: out.fileHandleForReading.availableData, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard let port = Int(line) else { throw XCTSkip("stub server did not start: \(line)") }
+        TestDebug.log("http stub bound address=127.0.0.1:\(port)")
         return URL(string: "http://127.0.0.1:\(port)")!
     }
 
     private func makeFixture(digestOverride: String? = nil) throws -> Fixture {
         let top = try makeTempDir()
-        addTeardownBlock { try? FileManager.default.removeItem(at: top) }
+        addDebugTeardownBlock { try? FileManager.default.removeItem(at: top) }
         let root = top.appendingPathComponent("server")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
@@ -87,7 +88,7 @@ final class UpdateEndToEndTests: XCTestCase {
         h.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
         h.arguments = ["create", "-volname", "rmount", "-srcfolder", srcDir.path, "-fs", "HFS+", "-size", "20m", "-format", "UDZO", "-ov", dmg.path]
         h.standardOutput = Pipe(); h.standardError = Pipe()
-        try h.run(); h.waitUntilExit()
+        try h.debugRun(); h.debugWaitUntilExit()
         guard h.terminationStatus == 0 else { throw XCTSkip("hdiutil unavailable") }
         _ = newApp
 

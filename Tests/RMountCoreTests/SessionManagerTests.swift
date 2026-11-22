@@ -44,7 +44,7 @@ private final class FakeMounter: Mounter {
 }
 
 @MainActor
-final class SessionManagerTests: XCTestCase {
+final class SessionManagerTests: DebugTestCase {
     private struct Fixture {
         let manager: SessionManager
         let mounter: FakeMounter
@@ -68,7 +68,9 @@ final class SessionManagerTests: XCTestCase {
                 controlClient ?? URLSessionRcloneControlClient(port: spawned.rcPort, user: spawned.rcUser, password: spawned.rcPassword)
             }
         )
-        addTeardownBlock { @MainActor in
+        addDebugTeardownBlock { @MainActor in
+            TestDebug.log("teardown main-actor body start")
+            defer { TestDebug.log("teardown main-actor body finish") }
             manager.shutdownAll()
             for s in manager.sessions { try? manager.delete(s.id) }
             try? FileManager.default.removeItem(at: dir)
@@ -229,7 +231,7 @@ final class SessionManagerTests: XCTestCase {
         XCTAssertNil(session.mountpoint)
         XCTAssertNil(session.rcloneProcess)
         XCTAssertEqual(f.mounter.unmounted, ["/Volumes/fake/my server"])
-        proc.waitUntilExit()
+        proc.debugWaitUntilExit()
         XCTAssertFalse(proc.isRunning)
     }
 

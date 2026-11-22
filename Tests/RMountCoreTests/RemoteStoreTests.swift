@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class RemoteStoreTests: XCTestCase {
+final class RemoteStoreTests: DebugTestCase {
     var tmpDir: URL!
 
     override func setUpWithError() throws {

@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class GoogleClientIDTests: XCTestCase {
+final class GoogleClientIDTests: DebugTestCase {
     private let drive = BackendDescriptor.googleDrive
 
     func testSharedClientIDIsDetectedWhenBlank() {

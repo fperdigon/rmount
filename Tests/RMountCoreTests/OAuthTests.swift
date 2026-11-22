@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class OAuthParseTests: XCTestCase {
+final class OAuthParseTests: DebugTestCase {
     private let json = #"{"access_token":"AT","token_type":"Bearer","refresh_token":"RT","expiry":"2030-01-01T00:00:00Z"}"#
 
     func testParsesTokenBetweenMarkers() {
@@ -44,11 +44,11 @@ final class OAuthParseTests: XCTestCase {
     }
 }
 
-final class OAuthAuthorizerTests: XCTestCase {
+final class OAuthAuthorizerTests: DebugTestCase {
     private func make() throws -> (FakeRclone, URL) {
         try FakeRclone.requirePython()
         let dir = try makeTempDir()
-        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        addDebugTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         return (try FakeRclone.make(in: dir), dir)
     }
 

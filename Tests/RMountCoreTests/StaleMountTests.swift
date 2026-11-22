@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class StaleMountTests: XCTestCase {
+final class StaleMountTests: DebugTestCase {
     private let mountOutput = """
     /dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
     127.0.0.1:/ on /Users/fco/rmount/DevEnv (nfs, nodev, nosuid, mounted by fco)
@@ -65,7 +65,7 @@ final class StaleMountTests: XCTestCase {
 }
 
 @MainActor
-final class RcloneExitWatcherTests: XCTestCase {
+final class RcloneExitWatcherTests: DebugTestCase {
     private var dir: URL!
 
     override func setUpWithError() throws {
@@ -91,7 +91,7 @@ final class RcloneExitWatcherTests: XCTestCase {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         p.arguments = ["-c", "exit \(status)"]
-        try p.run(); p.waitUntilExit()
+        try p.debugRun(); p.debugWaitUntilExit()
         return p
     }
 

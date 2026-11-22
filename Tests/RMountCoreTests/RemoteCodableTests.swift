@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class RemoteCodableTests: XCTestCase {
+final class RemoteCodableTests: DebugTestCase {
     func testSFTPRemoteRoundTrip() throws {
         let r = Remote(
             id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,

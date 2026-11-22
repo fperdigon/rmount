@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class UserPreferencesTests: XCTestCase {
+final class UserPreferencesTests: DebugTestCase {
     private var suiteName: String!
     private var defaults: UserDefaults!
 

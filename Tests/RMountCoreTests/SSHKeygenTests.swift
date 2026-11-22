@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class SSHKeygenTests: XCTestCase {
+final class SSHKeygenTests: DebugTestCase {
     func testGenerateEd25519() throws {
         guard FileManager.default.isExecutableFile(atPath: "/usr/bin/ssh-keygen") else {
             throw XCTSkip("ssh-keygen not available")

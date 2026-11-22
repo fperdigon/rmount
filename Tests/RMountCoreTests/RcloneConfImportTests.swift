@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class RcloneConfParserTests: XCTestCase {
+final class RcloneConfParserTests: DebugTestCase {
     func testParsesSectionsOptionsAndSplitsTypeOut() {
         let text = """
         # comment
@@ -51,7 +51,7 @@ final class RcloneConfParserTests: XCTestCase {
     }
 }
 
-final class RcloneConfImporterTests: XCTestCase {
+final class RcloneConfImporterTests: DebugTestCase {
     private let reveal: (String) throws -> String = { s in
         guard s.hasPrefix("OBS-") else { throw RcloneProcess.RevealError.failed("bad") }
         return String(s.dropFirst(4))
@@ -192,7 +192,7 @@ final class RcloneConfImporterTests: XCTestCase {
 }
 
 @MainActor
-final class RcloneConfImportManagerTests: XCTestCase {
+final class RcloneConfImportManagerTests: DebugTestCase {
     private func makeManager() throws -> (SessionManager, KeychainService, FakeRclone, URL) {
         try FakeRclone.requirePython()
         let dir = try makeTempDir()
@@ -200,7 +200,9 @@ final class RcloneConfImportManagerTests: XCTestCase {
         let keychain = KeychainService(serviceName: "rmount.tests.\(UUID().uuidString)")
         let manager = SessionManager(store: RemoteStore(directory: dir), keychain: keychain, mounter: Mounter(),
                                      logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone.binary)
-        addTeardownBlock { @MainActor in
+        addDebugTeardownBlock { @MainActor in
+            TestDebug.log("teardown main-actor body start")
+            defer { TestDebug.log("teardown main-actor body finish") }
             for s in manager.sessions { try? manager.delete(s.id) }
             try? FileManager.default.removeItem(at: dir)
         }
@@ -276,7 +278,7 @@ final class RcloneConfImportManagerTests: XCTestCase {
     func testRevealRunsRclone() throws {
         try FakeRclone.requirePython()
         let dir = try makeTempDir()
-        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        addDebugTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         let rclone = try FakeRclone.make(in: dir)
         XCTAssertEqual(try RcloneProcess.reveal(obscured: "OBS-hello", binary: rclone.binary), "hello")
         XCTAssertThrowsError(try RcloneProcess.reveal(obscured: "garbage", binary: rclone.binary)) {
@@ -285,7 +287,7 @@ final class RcloneConfImportManagerTests: XCTestCase {
     }
 }
 
-final class RcloneConfImporterSMBTests: XCTestCase {
+final class RcloneConfImporterSMBTests: DebugTestCase {
     private let reveal: (String) throws -> String = { String($0.dropFirst(4)) }
 
     private func convert(_ options: [String: String]) -> ImportOutcome {
@@ -322,7 +324,7 @@ final class RcloneConfImporterSMBTests: XCTestCase {
 }
 
 @MainActor
-final class RcloneConfImportSMBManagerTests: XCTestCase {
+final class RcloneConfImportSMBManagerTests: DebugTestCase {
     func testImportRequiresAndAppliesTheShare() async throws {
         try FakeRclone.requirePython()
         let dir = try makeTempDir()
@@ -330,7 +332,9 @@ final class RcloneConfImportSMBManagerTests: XCTestCase {
         let kc = KeychainService(serviceName: "rmount.tests.\(UUID().uuidString)")
         let m = SessionManager(store: RemoteStore(directory: dir), keychain: kc,
                                mounter: Mounter(), logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone.binary)
-        addTeardownBlock { @MainActor in
+        addDebugTeardownBlock { @MainActor in
+            TestDebug.log("teardown main-actor body start")
+            defer { TestDebug.log("teardown main-actor body finish") }
             for s in m.sessions { try? m.delete(s.id) }
             try? FileManager.default.removeItem(at: dir)
         }

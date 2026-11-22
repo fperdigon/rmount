@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class MounterTests: XCTestCase {
+final class MounterTests: DebugTestCase {
     func testVolumeNameStripsIllegalCharacters() {
         let m = Mounter()
         XCTAssertEqual(m.volumeName(from: "my/server"), "my-server")

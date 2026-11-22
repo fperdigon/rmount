@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class VersionAndBuildInfoTests: XCTestCase {
+final class VersionAndBuildInfoTests: DebugTestCase {
     func testVersionCompare() {
         XCTAssertEqual(VersionCompare.compare("0.1.2", "0.1.3"), -1)
         XCTAssertEqual(VersionCompare.compare("0.1.3", "0.1.3"), 0)
@@ -40,7 +40,7 @@ final class VersionAndBuildInfoTests: XCTestCase {
     }
 }
 
-final class ReleaseDecodingTests: XCTestCase {
+final class ReleaseDecodingTests: DebugTestCase {
     private let json = #"""
     {"tag_name":"v0.1.3","name":"v0.1.3","prerelease":false,"draft":false,
      "body":"<!-- nightly-sha: abc -->\n## What's new\n- thing","html_url":"https://github.com/o/r/releases/tag/v0.1.3",
@@ -77,7 +77,7 @@ final class ReleaseDecodingTests: XCTestCase {
     }
 }
 
-final class UpdateCheckerTests: XCTestCase {
+final class UpdateCheckerTests: DebugTestCase {
     private func asset(_ name: String) -> String {
         #"{"name":"\#(name)","browser_download_url":"https://dl.example/\#(name)","size":1}"#
     }
@@ -233,7 +233,7 @@ final class UpdateCheckerTests: XCTestCase {
     }
 }
 
-final class UpdatePreferencesTests: XCTestCase {
+final class UpdatePreferencesTests: DebugTestCase {
     private func prefs() -> UserPreferences {
         UserPreferences(defaults: UserDefaults(suiteName: "rmount.tests.\(UUID().uuidString)")!)
     }

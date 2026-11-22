@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class RcloneConfigBuilderBackendTests: XCTestCase {
+final class RcloneConfigBuilderBackendTests: DebugTestCase {
     private func remote(_ backend: Backend) -> Remote {
         Remote(id: UUID(), name: "r", backend: backend, mountProtocol: .webdav, autoMount: false)
     }
@@ -114,7 +114,7 @@ final class RcloneConfigBuilderBackendTests: XCTestCase {
     }
 }
 
-final class RcloneConfigBuilderGenericTests: XCTestCase {
+final class RcloneConfigBuilderGenericTests: DebugTestCase {
     private func webdav() -> Remote { makeRemote(backend: webdavBackend()) }
 
     func testWebDAVConfigListsSortedOptionsAndNoSecret() throws {

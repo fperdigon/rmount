@@ -4,7 +4,7 @@ import XCTest
 /// Real servers started by scripts/ci/start-backends.sh: an sshd (password + key auth),
 /// an FTP server and an S3 server. Skipped when the RMOUNT_IT_* variables are absent.
 @MainActor
-final class BackendIntegrationTests: XCTestCase {
+final class BackendIntegrationTests: DebugTestCase {
     private let sftpKeys = ["RMOUNT_IT_SFTP_PORT", "RMOUNT_IT_SFTP_USER", "RMOUNT_IT_SFTP_PASS",
                             "RMOUNT_IT_SFTP_KEY", "RMOUNT_IT_SFTP_AUTHKEYS", "RMOUNT_IT_SFTP_DIR"]
 
@@ -222,7 +222,9 @@ final class BackendIntegrationTests: XCTestCase {
         let manager = SessionManager(
             store: RemoteStore(directory: dir), keychain: KeychainService(serviceName: "rmount.it.\(UUID().uuidString)"),
             mounter: Mounter(), logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone)
-        addTeardownBlock { @MainActor in
+        addDebugTeardownBlock { @MainActor in
+            TestDebug.log("teardown main-actor body start")
+            defer { TestDebug.log("teardown main-actor body finish") }
             manager.shutdownAll()
             for session in manager.sessions { try? manager.delete(session.id) }
             try? FileManager.default.removeItem(at: dir)

@@ -1,11 +1,11 @@
 import XCTest
 @testable import RMountCore
 
-final class RcloneProcessTests: XCTestCase {
+final class RcloneProcessTests: DebugTestCase {
     private func fixture() throws -> (FakeRclone, RcloneProcess, URL) {
         try FakeRclone.requirePython()
         let dir = try makeTempDir()
-        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        addDebugTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         let fake = try FakeRclone.make(in: dir)
         let runner = RcloneProcess(binary: fake.binary, logFile: dir.appendingPathComponent("rclone.log"))
         return (fake, runner, dir)
@@ -22,7 +22,8 @@ final class RcloneProcessTests: XCTestCase {
             remoteName: "r", remotePath: "/data", configText: "[r]\ntype = sftp\n",
             baseurl: "/vol", liveUpdates: true, envOverrides: ["RMOUNT_TEST_ENV": "hello"]
         )
-        defer { spawned.process.terminate() }
+        TestDebug.spawned(spawned)
+        defer { spawned.process.stopAndReap() }
 
         let lines = fake.recordedLines()
         XCTAssertEqual(Array(lines.prefix(3)), ["serve", "webdav", "r:/data"])
@@ -59,7 +60,8 @@ final class RcloneProcessTests: XCTestCase {
         let spawned = try runner.spawnWebDAVServe(
             remoteName: "r", remotePath: "/", configText: "[r]\n", baseurl: "/v", liveUpdates: false
         )
-        defer { spawned.process.terminate() }
+        TestDebug.spawned(spawned)
+        defer { spawned.process.stopAndReap() }
         let lines = fake.recordedLines()
         XCTAssertFalse(lines.contains("--dir-cache-time"))
         XCTAssertFalse(lines.contains("--vfs-fast-fingerprint"))
@@ -71,7 +73,8 @@ final class RcloneProcessTests: XCTestCase {
         let spawned = try runner.spawnNFSServe(
             remoteName: "r", remotePath: "bucket/prefix", configText: "[r]\n", liveUpdates: true
         )
-        defer { spawned.process.terminate() }
+        TestDebug.spawned(spawned)
+        defer { spawned.process.stopAndReap() }
         let lines = fake.recordedLines()
         XCTAssertEqual(Array(lines.prefix(3)), ["serve", "nfs", "r:bucket/prefix"])
         XCTAssertFalse(lines.contains("--user"))
@@ -84,10 +87,12 @@ final class RcloneProcessTests: XCTestCase {
     func testSpawnDistinctPorts() throws {
         let (_, runner, _) = try fixture()
         let a = try runner.spawnNFSServe(remoteName: "r", remotePath: "/", configText: "[r]\n", liveUpdates: false)
-        defer { a.process.terminate() }
+        TestDebug.spawned(a)
+        defer { a.process.stopAndReap() }
         XCTAssertGreaterThan(a.port, 1023)
         let b = try runner.spawnNFSServe(remoteName: "r", remotePath: "/", configText: "[r]\n", liveUpdates: false)
-        defer { b.process.terminate() }
+        TestDebug.spawned(b)
+        defer { b.process.stopAndReap() }
         XCTAssertNotEqual(a.rcPort, a.port)
         XCTAssertNotEqual(b.rcPort, b.port)
         XCTAssertNotEqual(a.rcUser, b.rcUser)
@@ -96,7 +101,7 @@ final class RcloneProcessTests: XCTestCase {
 
     func testLaunchFailureThrows() throws {
         let dir = try makeTempDir()
-        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        addDebugTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         let runner = RcloneProcess(
             binary: URL(fileURLWithPath: "/nonexistent/rclone"),
             logFile: dir.appendingPathComponent("rclone.log")

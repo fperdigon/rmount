@@ -6,7 +6,7 @@ import XCTest
 /// a CI secret. Optional: RMOUNT_IT_GDRIVE_CLIENT_ID / _CLIENT_SECRET (own OAuth client, avoids
 /// rclone's shared rate limits) and RMOUNT_IT_GDRIVE_FOLDER (root folder ID to confine the test).
 @MainActor
-final class GoogleDriveIntegrationTests: XCTestCase {
+final class GoogleDriveIntegrationTests: DebugTestCase {
     private struct Env {
         let token: String, clientID: String, clientSecret: String, folder: String
     }
@@ -50,9 +50,9 @@ final class GoogleDriveIntegrationTests: XCTestCase {
         let out = Pipe()
         p.standardOutput = out
         p.standardError = Pipe()
-        guard (try? p.run()) != nil else { return nil }
+        guard (try? p.debugRun()) != nil else { return nil }
         let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+        p.debugWaitUntilExit()
         return p.terminationStatus == 0 ? String(data: data, encoding: .utf8) : nil
     }
 
@@ -86,7 +86,9 @@ final class GoogleDriveIntegrationTests: XCTestCase {
         let remote = Remote(id: UUID(), name: "rmount-it-gdrive-refresh-\(Int.random(in: 1000...9999))",
                             backend: backend(e), mountProtocol: .nfs, autoMount: false)
         try manager.add(remote, optionSecrets: secrets(e, token: stale).options)
-        addTeardownBlock { @MainActor in
+        addDebugTeardownBlock { @MainActor in
+            TestDebug.log("teardown main-actor body start")
+            defer { TestDebug.log("teardown main-actor body finish") }
             manager.shutdownAll(); try? manager.delete(remote.id); try? FileManager.default.removeItem(at: dir)
         }
 

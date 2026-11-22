@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class RemoteSessionTests: XCTestCase {
+final class RemoteSessionTests: DebugTestCase {
     func testInitialStateIsIdle() {
         let r = makeRemote()
         let session = RemoteSession(remote: r)

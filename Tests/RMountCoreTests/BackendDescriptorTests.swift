@@ -1,7 +1,7 @@
 import XCTest
 @testable import RMountCore
 
-final class BackendDescriptorTests: XCTestCase {
+final class BackendDescriptorTests: DebugTestCase {
     private let d = BackendDescriptor.webdav
     private let valid = ["url": "https://cloud.example.com/remote.php/dav/files/bob/",
                          "vendor": "nextcloud", "user": "bob", "pass": "secret"]
@@ -93,7 +93,7 @@ final class BackendDescriptorTests: XCTestCase {
     }
 }
 
-final class GoogleDriveDescriptorTests: XCTestCase {
+final class GoogleDriveDescriptorTests: DebugTestCase {
     private let d = BackendDescriptor.googleDrive
     private let token = #"{"access_token":"AT","refresh_token":"RT"}"#
 
@@ -151,7 +151,7 @@ final class GoogleDriveDescriptorTests: XCTestCase {
     }
 }
 
-final class SMBDescriptorTests: XCTestCase {
+final class SMBDescriptorTests: DebugTestCase {
     private let d = BackendDescriptor.smb
     private let valid = ["host": "nas.local", "port": "445", "user": "bob", "pass": "pw", "domain": ""]
 
@@ -198,7 +198,7 @@ final class SMBDescriptorTests: XCTestCase {
     }
 }
 
-final class NativeCloudDescriptorTests: XCTestCase {
+final class NativeCloudDescriptorTests: DebugTestCase {
     func testRegistry() {
         XCTAssertEqual(BackendDescriptor.descriptor(forType: "azureblob"), .azureBlob)
         XCTAssertEqual(BackendDescriptor.descriptor(forType: "b2"), .backblazeB2)
@@ -237,7 +237,7 @@ final class NativeCloudDescriptorTests: XCTestCase {
     }
 }
 
-final class RawBackendInputTests: XCTestCase {
+final class RawBackendInputTests: DebugTestCase {
     func testParsesLinesCommentsAndEqualsInValues() throws {
         let p = try RawBackendInput.parse("# c\n\nregion = eu=1\n  use_emulator=true ")
         XCTAssertEqual(p.map(\.key), ["region", "use_emulator"])
