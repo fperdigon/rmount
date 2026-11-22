@@ -50,6 +50,31 @@ Integration tests are gated by `RMOUNT_IT_*` environment variables and are norma
 CI (see below). Do not commit changes you could not compile or test; if you work in an
 environment without macOS, open a PR and let CI be the judge.
 
+### Running tests, and when a run hangs
+
+- Run `swift test` yourself on the Mac; a coding agent's sandbox (Codex) can build but cannot run the suite
+  (Application Support and Keychain writes are denied, `ps` is blocked), so it cannot verify tests. Have agents
+  write code and tests, then run them here. Never give an agent an unsandboxed run without the user saying so.
+- macOS has no `timeout`: bound every run with `perl -e 'alarm 600; exec @ARGV' swift test ...`, or a watcher that
+  samples and kills a run that prints nothing for ~90 s. Use `--scratch-path` to keep a separate build for it.
+  Always send output to a file and read the end of it; do not stream a whole run into your context.
+- Never block a test on `Process.waitUntilExit()` after `terminate()`: Foundation can miss the wakeup and block
+  forever although `isRunning` is already false and the pid is gone (this hung the whole suite; it only showed
+  after `RcloneProcessTests` ran earlier in the same process). Stop children with `Process.stopAndReap()` from
+  `TestSupport.swift` (terminate, poll `isRunning` with a deadline, SIGKILL fallback) and never leave a spawned
+  child running at the end of a test.
+- Opt-in debug logging, off by default and with no effect on output when unset: `RMOUNT_TEST_DEBUG=1` logs test
+  start/finish, spawned processes (arguments redacted), terminate/wait calls, port binds, teardown blocks and a 5 s
+  watchdog on `waitUntilExit`; `RMOUNT_TEST_DEBUG_FILE=<path>` also appends the lines to a file, which you need
+  because `swift test` holds back the test process's stderr when a run stalls. Debug output must never reach a
+  stream a test asserts on (the fake rclone writes only to the file).
+- How to find a hang: reproduce with the flag on, take `sample <xctest pid> 3` and `lsof` when the log goes silent,
+  then bisect by test class (`swift test list`, `--filter "RMountCoreTests\.(A|B)/"`), halve the set until a
+  pair remains, then pair single methods. A class that passes alone can still hang in combination: a leaked
+  process, port or Foundation state from an earlier test is the usual cause.
+- Product code also uses `waitUntilExit()` (mounting, SSH keygen, host-key scan, connection tester, updater). Keep it
+  off the main thread; if you touch one, consider a bounded wait.
+
 ## Ways of working
 
 - Develop on a branch, open a PR against `main` on this repo, and keep CI green.
@@ -63,6 +88,12 @@ environment without macOS, open a PR and let CI be the judge.
   changes. Update the README when adding a backend.
 - Commit messages: short imperative subject, explain the why in the body.
 - Keep changes focused; do not refactor unrelated code in a feature PR.
+- This repo is a fork of `AyonPal/macsh`, and `gh pr create` defaults to the upstream parent. Always pass
+  `--repo fperdigon/rmount` (and `--base`/`--head`) to `gh pr create`, `gh pr view`, `gh pr merge`, and check the URL it
+  prints. A PR opened upstream by mistake must be closed at once with a short apology.
+- Stacked PRs: base a PR on the branch it depends on (`--base <branch>`); GitHub retargets it to `main` when that
+  branch merges. Merge them in order.
+- Do not commit `AGENTS.md` edits that are not yours: stage files by name (`git add <paths>`), never `git add -A`.
 
 ## Code conventions
 
@@ -108,6 +139,58 @@ environment without macOS, open a PR and let CI be the judge.
 4. Real-world checks that CI cannot do (Finder behaviour, a real provider account) are
    listed in the PR description as manual steps.
 
+## Verify in the macOS VM after every build (required)
+
+Unit tests and CI do not show what the user sees. After any change that is compiled (code, UI, mount
+behaviour, packaging), finish the work by building the release DMG and testing it in the UTM macOS test VM,
+with screenshots. Do this before opening or merging the PR and again after meaningful fixes. A change that
+only touches docs or CI files is exempt. If the VM cannot be used, say so in the PR; never claim it was tested.
+
+Tools (user-level skill, not in this repo): `~/.claude/skills/utm-macos-vm/` (`SKILL.md`, `LESSONS.md`, `scripts/`).
+Read `LESSONS.md` first and append what you learn. VM name: `rmount-test-base` (to be renamed `macos-test-base`;
+`utmctl list` shows the current one). `S=~/.claude/skills/utm-macos-vm/scripts`. Guest login is in the skill's
+`guest-account.txt`; never print it or commit it.
+
+Flow:
+
+1. **Compile and unit-test on the host**: `swift build`, `swift test --filter <the suites you touched>`. The
+   full suite can hang on a developer Mac in an integration teardown; CI runs it.
+2. **Build the DMG**: `./scripts/build-release.sh` -> `dist/rmount-<version>.dmg` (runs `verify-dmg.sh`).
+3. **Start the VM** if needed (`utmctl start`), then `utmctl ip-address <vm>`. UTM can stay in the background.
+4. **Copy and install** (`$S/vmssh.sh <vm> '<cmd>'`, `$S/vmssh.sh <vm> --put <file> <dir>`): detach every
+   `/Volumes/rmount*` first (a stale mount makes you install the OLD app), `hdiutil attach`, replace
+   `/Applications/rmount.app`, `xattr -dr com.apple.quarantine`, and check the binary size matches the host build.
+   Kill the old app with `kill -9` (`pkill` only raises the quit dialog). The guest has no `python3`/CLT: use
+   `sed`/`plutil`/`curl` there, or it pops an install prompt.
+5. **Seed a remote** in the guest's `~/Library/Application Support/ai.rmount/remotes.json` (shape in the
+   skill) pointing at a test server on the host (`rclone serve webdav <dir> --addr 192.168.64.1:18080`, the guest
+   reaches the host at 192.168.64.1). Never use the user's real remotes or touch the user's running RMount.
+6. **Throttle on purpose** when testing transfers: `bandwidthLimit` is rclone `--bwlimit` and is `UP:DOWN`
+   (`10M:100M` = upload 10 MB/s). Use real large files (1-2 GB, `dd if=/dev/urandom` over SSH, the guest has
+   space) so progress is observable for minutes. Compare checksums on the host after the queue drains.
+7. **Drive the UI and take pictures**: `$S/vmctl.sh <vm> shot /path/x.png` (screen), `... click X Y`,
+   `... key "text"`, `... sc <scancodes>` (make+break pairs). Open the menu-bar menu, every window or menu item
+   you changed, the empty state, the error state and the busy state, and look at each image. Writes to a
+   mounted volume must be typed into the guest's GUI Terminal (SSH gets EPERM from TCC); click that Terminal
+   first so the keystrokes do not go to another window.
+8. **Probe rclone directly** to confirm the UI is telling the truth (`$S/rcprobe.sh` in the guest prints
+   `vfs/queue` and `core/stats`).
+9. **Record the evidence**: put the screenshots in the PR description or a comment (attach files, or list what
+   each shows), plus what was exercised, what was not, and any failure. Send the user the key screenshots.
+10. **Clean up**: stop the host test server, delete the test files and seeded remotes, leave the VM in a known
+    state, and add new findings to the skill's `LESSONS.md`.
+
+Harness lessons: `--bwlimit` order is `UP:DOWN`; detach every `/Volumes/rmount*` before attaching a new DMG;
+`vmctl.sh` takes the VM name first (`vmctl.sh <vm> shot FILE`); keystrokes go to the focused window, so click the
+Terminal before typing; a Space (`sc 57,185`) first avoids losing the first typed characters; and the copy into a
+mount returns in seconds (local cache), so judge uploads by `vfs/queue` and the Transfers window, and by a
+checksum on the host after the queue drains.
+
+Cover at least: first launch from the DMG (Gatekeeper), mount and read/write for both protocols NFS and WebDAV
+when the change can affect them, the changed UI, quit/unmount guards when uploads are pending, and several
+remotes at once when the change is per-remote. Keep the VM to what was installed for the test; do not enable
+macOS security settings or sign in to an Apple account in it.
+
 ## Things to avoid
 
 - Don't add dependencies without a reason; the core is dependency-free.
@@ -133,3 +216,8 @@ old name, so an older version keeps working side by side.
 **Removal:** drop the aliases (delete `LegacyNames.swift` and each use, the `MACSH_IT_*` fallbacks) in the first release that is at least six months after
 the first RMount release, or earlier once no install of macsh can still be updating. Do it in one PR,
 and add a CHANGELOG line that old data is no longer migrated.
+
+## Context hygiene: delegate to agents
+- Always use agents (subagents / Codex agents) for work that produces bulky output or many tool calls (searches, long logs, test and eval runs, wide file reads, coding), so the main context stays clean.
+- The main session plans, briefs, reviews the result and talks to the user; agents return only a short report with what matters.
+- Do not pull raw logs, full diffs or large files into the main context when an agent can summarize them.
