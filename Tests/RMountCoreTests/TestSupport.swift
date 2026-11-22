@@ -296,3 +296,11 @@ extension Process {
         TestDebug.log("stopAndReap done pid=\(processIdentifier) stillRunning=\(isRunning)")
     }
 }
+
+
+/// Keep session tests from changing the running app's Finder extension state.
+@MainActor
+final class NoopFinderBadgeStatusWriter: FinderBadgeStatusWriting {
+    func write(_ snapshot: FinderBadgeSnapshot) {}
+    func flush(_ snapshot: FinderBadgeSnapshot) {}
+}

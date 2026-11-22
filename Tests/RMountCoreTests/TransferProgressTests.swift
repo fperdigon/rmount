@@ -33,6 +33,7 @@ final class TransferProgressTests: DebugTestCase {
         ])
         let rows = queue.status(stats: stats).transfers
         XCTAssertEqual(rows.count, 5)
+        XCTAssertEqual(rows.map(\.tries), [nil, nil, nil, nil, 2])
         XCTAssertEqual(rows.map(\.state), [.queued, .uploading, .uploading, .finishing, .retrying])
         XCTAssertNil(rows[0].bytesDone)
         XCTAssertEqual(rows[1].bytesDone, 40)
@@ -119,4 +120,17 @@ final class TransferProgressTests: DebugTestCase {
         XCTAssertEqual(huge.totalBytes, .max)
         XCTAssertEqual(huge.summary.bytesLeft, .max)
     }
+    func testQueueAttemptCountsReachTransferProgress() {
+        let rows = VFSQueue(queue: [
+            .init(name: "new"), .init(name: "failed", uploading: true, tries: 3),
+            .init(name: "many", tries: 9)
+        ]).status.transfers
+        XCTAssertNil(rows[0].tries)
+        XCTAssertEqual(rows[1].tries, 3)
+        XCTAssertEqual(rows[2].tries, 9)
+        let manuallyCreated = TransferProgress(path: "x", state: .queued, bytesDone: nil,
+                                               totalBytes: nil, fraction: nil, speed: nil, eta: nil)
+        XCTAssertNil(manuallyCreated.tries)
+    }
+
 }

@@ -23,7 +23,7 @@ class VerifyDmgTests(unittest.TestCase):
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="verify-dmg-test."))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
-    def make_app(self, root, name="rmount-lite", seal=False, exe=None):
+    def make_app(self, root, name="rmount-lite", seal=False, exe=None, extension=True):
         exe = exe or name
         app = root / f"{name}.app"
         (app / "Contents/MacOS").mkdir(parents=True)
@@ -36,14 +36,26 @@ class VerifyDmgTests(unittest.TestCase):
                            "CFBundleShortVersionString": "9.9.9", "CFBundleName": name,
                            "CFBundlePackageType": "APPL", "LSMinimumSystemVersion": "14.0"}, f)
         (app / "Contents/Resources/hello.txt").write_text("resource the signature must seal\n")
+        if extension:
+            appex = app / "Contents/PlugIns/RMountFinder.appex"
+            (appex / "Contents/MacOS").mkdir(parents=True)
+            shutil.copy(app / "Contents/MacOS" / exe, appex / "Contents/MacOS/RMountFinder")
+            with open(appex / "Contents/Info.plist", "wb") as f:
+                plistlib.dump({"CFBundleIdentifier": f"test.{name}.findersync",
+                               "CFBundleExecutable": "RMountFinder", "CFBundleName": "RMountFinder",
+                               "CFBundlePackageType": "XPC!", "CFBundleShortVersionString": "9.9.9",
+                               "NSExtension": {"NSExtensionPointIdentifier": "com.apple.FinderSync"}}, f)
+            if seal:
+                subprocess.run(["codesign", "--force", "--sign", "-", str(appex)],
+                               check=True, capture_output=True)
         if seal:
             subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app)], check=True, capture_output=True)
         return app
 
-    def make_dmg(self, name="rmount-lite", seal=False, applications_link=True, exe=None):
+    def make_dmg(self, name="rmount-lite", seal=False, applications_link=True, exe=None, extension=True):
         stage = self.tmp / f"stage-{name}-{seal}-{applications_link}"
         stage.mkdir()
-        self.make_app(stage, name, seal, exe)
+        self.make_app(stage, name, seal, exe, extension)
         if applications_link:
             os.symlink("/Applications", stage / "Applications")
         dmg = self.tmp / f"{name}-9.9.9.dmg"
@@ -66,6 +78,7 @@ class VerifyDmgTests(unittest.TestCase):
         code, out = self.verify(self.make_dmg(seal=True))
         self.assertEqual(code, 0, out)
         self.assertIn("code signature is valid for the whole bundle", out)
+        self.assertIn("Finder extension code signature is valid", out)
         self.assertIn("All checks passed", out)
 
     def test_legacy_named_alias_app_passes(self):
@@ -74,6 +87,11 @@ class VerifyDmgTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("executable is arm64", out)
         self.assertIn("lite flavour: no bundled rclone", out)
+
+    def test_missing_finder_extension_fails(self):
+        code, out = self.verify(self.make_dmg(seal=True, extension=False))
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("expected one Finder extension", out)
 
     def test_missing_applications_shortcut_fails(self):
         code, out = self.verify(self.make_dmg(seal=True, applications_link=False))

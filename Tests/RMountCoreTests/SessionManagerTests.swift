@@ -56,6 +56,7 @@ final class SessionManagerTests: DebugTestCase {
 
     private func makeFixture(controlClient: RcloneControlClient? = nil,
                              finderProgressFactory: FinderProgressFactory? = nil,
+                             finderBadgeTracker: FinderBadgeTracker? = nil,
                              preferences: UserPreferences? = nil) throws -> Fixture {
         try FakeRclone.requirePython()
         let dir = try makeTempDir()
@@ -68,6 +69,7 @@ final class SessionManagerTests: DebugTestCase {
             logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone.binary,
             preferences: preferences ?? UserPreferences(),
             finderProgressFactory: finderProgressFactory ?? SessionFinderProgressFactory(),
+            finderBadgeTracker: finderBadgeTracker ?? FinderBadgeTracker(writer: SessionFinderBadgeWriter()),
             controlClient: { spawned in
                 controlClient ?? URLSessionRcloneControlClient(port: spawned.rcPort, user: spawned.rcUser, password: spawned.rcPassword)
             }
@@ -955,5 +957,117 @@ extension SessionManagerTests {
         await refresh.value
         XCTAssertEqual(factory.handles.count, 1)
         XCTAssertNil(f.manager.uploadStatus[remote.id])
+    }
+}
+
+
+@MainActor
+private final class SessionFinderBadgeWriter: FinderBadgeStatusWriting {
+    var snapshots: [FinderBadgeSnapshot] = []
+    var flushes: [FinderBadgeSnapshot] = []
+    func write(_ snapshot: FinderBadgeSnapshot) { snapshots.append(snapshot) }
+    func flush(_ snapshot: FinderBadgeSnapshot) {
+        snapshots.append(snapshot)
+        flushes.append(snapshot)
+    }
+}
+
+extension SessionManagerTests {
+    func testFinderBadgesFollowStatusRootsAndUnmount() async throws {
+        let writer = SessionFinderBadgeWriter()
+        let tracker = FinderBadgeTracker(writer: writer)
+        let f = try makeFixture(finderBadgeTracker: tracker, preferences: finderPreferences())
+        let remotes = [makeRemote(name: "one", backend: sftpBackend()),
+                       makeRemote(name: "two", backend: sftpBackend())]
+        let clients = [SessionControlClient(), SessionControlClient()]
+        for (remote, client) in zip(remotes, clients) {
+            try f.manager.add(remote)
+            let mountpoint = f.dir.appendingPathComponent(remote.name).path
+            f.manager.sessions.first { $0.id == remote.id }!.mountpoint = mountpoint
+            f.manager.startUploadMonitor(remoteID: remote.id, client: client)
+            // The root is registered before the asynchronous first queue response.
+            XCTAssertTrue(tracker.snapshot.roots.contains(mountpoint))
+        }
+        try await waitForUploads { tracker.snapshot.items.count == 2 }
+        XCTAssertEqual(Set(tracker.snapshot.items.map(\.path)),
+                       Set(remotes.map { f.dir.appendingPathComponent($0.name).appendingPathComponent("pending").path }))
+        try await f.manager.unmount(remoteID: remotes[0].id)
+        XCTAssertEqual(tracker.snapshot.roots, [f.dir.appendingPathComponent("two").path])
+        XCTAssertEqual(tracker.snapshot.items.count, 1)
+        try f.manager.delete(remotes[1].id)
+        XCTAssertTrue(tracker.snapshot.roots.isEmpty)
+        XCTAssertTrue(tracker.snapshot.items.isEmpty)
+    }
+
+    func testFinderBadgesPreferenceClearsAndRepublishesMountedRoots() async throws {
+        let writer = SessionFinderBadgeWriter()
+        let tracker = FinderBadgeTracker(writer: writer)
+        let preferences = finderPreferences()
+        let f = try makeFixture(finderBadgeTracker: tracker, preferences: preferences)
+        let remote = makeRemote(backend: sftpBackend())
+        try f.manager.add(remote)
+        f.manager.sessions[0].mountpoint = "/Volumes/test"
+        let client = SessionControlClient()
+        f.manager.startUploadMonitor(remoteID: remote.id, client: client)
+        try await waitForUploads { tracker.snapshot.items.count == 1 }
+        preferences.showFinderBadges = false
+        XCTAssertTrue(tracker.snapshot.roots.isEmpty)
+        XCTAssertTrue(tracker.snapshot.items.isEmpty)
+        await f.manager.refreshUploadStatus()
+        XCTAssertTrue(tracker.snapshot.items.isEmpty)
+        preferences.showFinderBadges = true
+        XCTAssertEqual(tracker.snapshot.roots, ["/Volumes/test"])
+        XCTAssertEqual(tracker.snapshot.items.count, 1)
+        await Task.detached { preferences.showFinderBadges = false }.value
+        try await waitForUploads { tracker.snapshot.roots.isEmpty }
+        // An empty queue must still publish its mounted root when badges are enabled.
+        await client.drain()
+        await f.manager.refreshUploadStatus()
+        preferences.showFinderBadges = true
+        XCTAssertEqual(tracker.snapshot.roots, ["/Volumes/test"])
+        XCTAssertTrue(tracker.snapshot.items.isEmpty)
+    }
+
+    func testFinderBadgesHonorDisabledPreferenceAtInitialization() async throws {
+        let writer = SessionFinderBadgeWriter()
+        let tracker = FinderBadgeTracker(writer: writer)
+        let preferences = finderPreferences()
+        preferences.showFinderBadges = false
+        let f = try makeFixture(finderBadgeTracker: tracker, preferences: preferences)
+        let remote = makeRemote(backend: sftpBackend())
+        try f.manager.add(remote)
+        f.manager.sessions[0].mountpoint = "/Volumes/test"
+        f.manager.startUploadMonitor(remoteID: remote.id, client: SessionControlClient())
+        try await waitForUploads { f.manager.uploadStatus[remote.id] != nil }
+        XCTAssertFalse(tracker.isEnabled)
+        XCTAssertTrue(tracker.snapshot.roots.isEmpty)
+        XCTAssertTrue(tracker.snapshot.items.isEmpty)
+        preferences.showFinderBadges = true
+        XCTAssertEqual(tracker.snapshot.roots, ["/Volumes/test"])
+        XCTAssertEqual(tracker.snapshot.items.count, 1)
+    }
+
+    func testFinderBadgesShutdownFlushesEmptySnapshotAndRejectsOldCallback() async throws {
+        let writer = SessionFinderBadgeWriter()
+        let tracker = FinderBadgeTracker(writer: writer)
+        let f = try makeFixture(finderBadgeTracker: tracker, preferences: finderPreferences())
+        let remote = makeRemote(backend: sftpBackend())
+        try f.manager.add(remote)
+        f.manager.sessions[0].mountpoint = "/Volumes/test"
+        let client = SessionControlClient()
+        f.manager.startUploadMonitor(remoteID: remote.id, client: client)
+        try await waitForUploads { tracker.snapshot.items.count == 1 }
+        await client.setQueue(VFSQueue(queue: [.init(name: "late", size: 42)]))
+        await client.delayNext()
+        let refresh = Task { await f.manager.refreshUploadStatus() }
+        try await waitForUploads { await client.waiting != nil }
+        f.manager.shutdownAll()
+        XCTAssertFalse(writer.flushes.isEmpty)
+        XCTAssertTrue(writer.flushes.last!.roots.isEmpty)
+        XCTAssertTrue(writer.flushes.last!.items.isEmpty)
+        await client.release()
+        await refresh.value
+        XCTAssertTrue(tracker.snapshot.roots.isEmpty)
+        XCTAssertTrue(tracker.snapshot.items.isEmpty)
     }
 }

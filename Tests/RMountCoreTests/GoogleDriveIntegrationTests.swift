@@ -82,7 +82,7 @@ final class GoogleDriveIntegrationTests: DebugTestCase {
         let keychain = KeychainService(serviceName: "rmount.it.\(UUID().uuidString)")
         let manager = SessionManager(
             store: RemoteStore(directory: dir), keychain: keychain, mounter: Mounter(),
-            logsDir: dir.appendingPathComponent("logs"), rcloneBinary: try RcloneBinary.resolve())
+            logsDir: dir.appendingPathComponent("logs"), rcloneBinary: try RcloneBinary.resolve(), finderBadgeTracker: FinderBadgeTracker(writer: NoopFinderBadgeStatusWriter()))
         let remote = Remote(id: UUID(), name: "rmount-it-gdrive-refresh-\(Int.random(in: 1000...9999))",
                             backend: backend(e), mountProtocol: .nfs, autoMount: false)
         try manager.add(remote, optionSecrets: secrets(e, token: stale).options)

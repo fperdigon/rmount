@@ -53,6 +53,27 @@ verify_one() {
         fail "invalid code signature: ${sig##*: }  (users get 'damaged and can't be opened')"
     fi
 
+    local extensions extension extension_plist extension_bid point
+    extensions="$(find "$app/Contents/PlugIns" -maxdepth 1 -name '*.appex' -type d 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$extensions" = 1 ]; then
+        extension="$(find "$app/Contents/PlugIns" -maxdepth 1 -name '*.appex' -type d)"
+        extension_plist="$extension/Contents/Info.plist"
+        extension_bid="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$extension_plist" 2>/dev/null)"
+        point="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$extension_plist" 2>/dev/null)"
+        if [ "$extension_bid" = "$bid.findersync" ] && [ "$point" = "com.apple.FinderSync" ]; then
+            pass "Finder extension is embedded for this app flavour"
+        else
+            fail "Finder extension has incorrect bundle id or extension point"
+        fi
+        if codesign --verify --strict "$extension" >/dev/null 2>&1; then
+            pass "Finder extension code signature is valid"
+        else
+            fail "Finder extension code signature is invalid"
+        fi
+    else
+        fail "expected one Finder extension in Contents/PlugIns, found $extensions"
+    fi
+
     case "${exename:-$name}" in
         rmount-lite) [ -e "$app/Contents/Resources/rclone" ] && note "lite flavour contains rclone (unexpected)" || pass "lite flavour: no bundled rclone, as intended" ;;
         *)

@@ -83,7 +83,7 @@ final class RcloneExitWatcherTests: DebugTestCase {
         let manager = SessionManager(
             store: RemoteStore(directory: dir), keychain: KeychainService(serviceName: "ai.rmount.test"),
             mounter: Mounter(mountBase: dir), logsDir: dir.appendingPathComponent("logs"),
-            rcloneBinary: URL(fileURLWithPath: "/usr/bin/true"))
+            rcloneBinary: URL(fileURLWithPath: "/usr/bin/true"), finderBadgeTracker: FinderBadgeTracker(writer: NoopFinderBadgeStatusWriter()))
         return (manager, RemoteSession(remote: remote))
     }
 

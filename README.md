@@ -51,8 +51,27 @@ so nothing needs to be installed in the kernel.
 - **Live updates**: changes on the server show up in seconds in Responsive mode, or within a few minutes in the default Energy saving mode.
 - **Upload status**: open Transfers from the menu to see per-file upload progress, bytes left, speed and estimated time remaining, with a warning before quitting, unmounting or updating.
 - **Finder upload progress**: a small progress circle in Finder's list view follows real uploads, including queued files; enabled by default in General settings.
+- **Finder badges**: file status badges in icon, list and column views, using the included Finder extension.
 - **Auto-mount at login.**
 - **Passwords stored in your Keychain**, never on disk in plaintext.
+
+## Finder badges
+
+Enable the RMount Finder extension in **System Settings > General > Login Items & Extensions > Finder**.
+In RMount's General settings, **Show status badges in Finder** is on by default. Both NFS and WebDAV mounts are supported.
+
+| Badge | Meaning |
+| --- | --- |
+| Grey clock | Waiting to upload |
+| Blue progress circle | Uploading, in 25% steps; the final step stays at 75% until completion |
+| Green check | Uploaded; retained for 10 minutes |
+| Orange arrow | Retrying an upload |
+| Red warning | Upload has failed repeatedly (at least three tries) |
+| Crossed-out grey cloud | Upload status is unavailable because rclone is unreachable |
+
+Badges appear only for files RMount has seen in the upload queue; they do not indicate the sync state of every file on the remote.
+Each remote tracks up to 2,000 files, dropping the oldest uploaded badges first. Unmounting, quitting RMount, or switching badges off clears them.
+The extension needs enabling separately from the app. It is signed ad hoc with the app and is not notarized; follow the Gatekeeper instructions under **Download** before enabling it.
 
 ## How it works
 

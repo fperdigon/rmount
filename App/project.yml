@@ -61,6 +61,9 @@ targets:
     dependencies:
       - package: RMountCore
         product: RMountCore
+      - target: RMountFinder
+        embed: true
+        codeSign: true
 
   rmount-lite:
     type: application
@@ -96,3 +99,54 @@ targets:
     dependencies:
       - package: RMountCore
         product: RMountCore
+      - target: RMountFinderLite
+        embed: true
+        codeSign: true
+
+  RMountFinder:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: RMountFinder
+        excludes: [Info.plist, RMountFinder.entitlements]
+      - path: ../Sources/RMountCore/Finder/FinderBadgeSnapshot.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.rmount.findersync
+        INFOPLIST_FILE: RMountFinder/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "0.2.0"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        CODE_SIGN_ENTITLEMENTS: RMountFinder/RMountFinder.entitlements
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+    dependencies:
+      - sdk: FinderSync.framework
+
+  RMountFinderLite:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: RMountFinder
+        excludes: [Info.plist, RMountFinder.entitlements]
+      - path: ../Sources/RMountCore/Finder/FinderBadgeSnapshot.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.rmount.lite.findersync
+        INFOPLIST_FILE: RMountFinder/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "0.2.0"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        CODE_SIGN_ENTITLEMENTS: RMountFinder/RMountFinder.entitlements
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+    dependencies:
+      - sdk: FinderSync.framework

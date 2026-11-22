@@ -52,7 +52,7 @@ enum IntegrationHarness {
             keychain: KeychainService(serviceName: "rmount.it.\(UUID().uuidString)"),
             mounter: Mounter(),
             logsDir: dir.appendingPathComponent("logs"),
-            rcloneBinary: rclone
+            rcloneBinary: rclone, finderBadgeTracker: FinderBadgeTracker(writer: NoopFinderBadgeStatusWriter())
         )
         let remote = Remote(id: UUID(), name: "rmount-it-\(label)-\(Int.random(in: 1000...9999))",
                             backend: backend, mountProtocol: proto, autoMount: false, readOnly: readOnly)
@@ -129,7 +129,7 @@ extension IntegrationHarness {
             store: RemoteStore(directory: dir),
             keychain: KeychainService(serviceName: "rmount.it.\(UUID().uuidString)"),
             mounter: Mounter(), logsDir: dir.appendingPathComponent("logs"),
-            rcloneBinary: try RcloneBinary.resolve())
+            rcloneBinary: try RcloneBinary.resolve(), finderBadgeTracker: FinderBadgeTracker(writer: NoopFinderBadgeStatusWriter()))
         let remote = Remote(id: UUID(), name: "rmount-it-test", backend: backend,
                             mountProtocol: .webdav, autoMount: false)
         return await manager.testConnection(remote, draft: draft)

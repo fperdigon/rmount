@@ -120,6 +120,7 @@ private struct GeneralPane: View {
     @State private var launchAtLogin: Bool
     @State private var defaultProtocol: MountProtocol
     @State private var showFinderUploadProgress: Bool
+    @State private var showFinderBadges: Bool
 
     init(loginItemManager: LoginItemManager, prefs: UserPreferences) {
         self.loginItemManager = loginItemManager
@@ -127,6 +128,7 @@ private struct GeneralPane: View {
         _launchAtLogin = State(initialValue: loginItemManager.isEnabled)
         _defaultProtocol = State(initialValue: prefs.defaultProtocol)
         _showFinderUploadProgress = State(initialValue: prefs.showFinderUploadProgress)
+        _showFinderBadges = State(initialValue: prefs.showFinderBadges)
     }
 
     var body: some View {
@@ -150,6 +152,14 @@ private struct GeneralPane: View {
                     .labelsHidden()
                     .frame(maxWidth: 200)
                     .onChange(of: defaultProtocol) { _, p in prefs.defaultProtocol = p }
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Show status badges in Finder", isOn: $showFinderBadges)
+                        .toggleStyle(.checkbox)
+                        .onChange(of: showFinderBadges) { _, value in prefs.showFinderBadges = value }
+                    Text("Needs the RMount Finder extension: enable it in System Settings > General > Login Items & Extensions > Finder. Shows waiting, uploading, uploaded, error and offline badges on files in your mounts.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("Show upload progress in Finder (list view)", isOn: $showFinderUploadProgress)
