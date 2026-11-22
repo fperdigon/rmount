@@ -19,12 +19,14 @@ final class MenuBarController {
     private var editWindows: [UUID: NSWindow] = [:]
     private var logWindows: [UUID: NSWindow] = [:]
     private let updater: UpdateController
+    private let finderExtensionPrompt: FinderExtensionPromptController
 
     init(manager: SessionManager, loginItemManager: LoginItemManager, prefs: UserPreferences) {
         self.manager = manager
         self.loginItemManager = loginItemManager
         self.prefs = prefs
         self.updater = UpdateController(prefs: prefs, manager: manager)
+        self.finderExtensionPrompt = FinderExtensionPromptController(prefs: prefs)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         rebuildMenu()
         manager.$sessions
@@ -36,6 +38,7 @@ final class MenuBarController {
             .sink { [weak self] _ in self?.rebuildMenu() }
             .store(in: &cancellables)
         updater.checkInBackgroundIfDue()
+        finderExtensionPrompt.checkAfterLaunch()
     }
 
     private func rebuildMenu() {
@@ -296,7 +299,7 @@ final class MenuBarController {
     private func openSettings(tab: SettingsView.Tab) {
         settingsNavigator.tab = tab
         if settingsWindow == nil {
-            let view = SettingsView(navigator: settingsNavigator, loginItemManager: loginItemManager, prefs: prefs, onCheckForUpdates: { [weak self] in self?.updater.checkNow() })
+            let view = SettingsView(navigator: settingsNavigator, loginItemManager: loginItemManager, prefs: prefs, finderExtensionPrompt: finderExtensionPrompt, onCheckForUpdates: { [weak self] in self?.updater.checkNow() })
             let host = NSHostingController(rootView: view)
             let win = NSWindow(contentViewController: host)
             win.title = "Settings"
@@ -305,6 +308,7 @@ final class MenuBarController {
             settingsWindow = win
         }
         Self.present(settingsWindow)
+        Task { await finderExtensionPrompt.refreshStatus() }
     }
 
     /// Centers a cached window before showing it, so it doesn't reopen at the

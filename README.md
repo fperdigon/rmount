@@ -57,8 +57,11 @@ so nothing needs to be installed in the kernel.
 
 ## Finder badges
 
-Enable the RMount Finder extension in **System Settings > General > Login Items & Extensions > Finder**.
+Switch on RMount in **System Settings > General > Login Items & Extensions**: on macOS 26 it is listed under **File Providers**; on older versions look under **Finder** (not verified there).
 In RMount's General settings, **Show status badges in Finder** is on by default. Both NFS and WebDAV mounts are supported.
+RMount prompts you to enable the extension when badges are on and the extension is not enabled, with an **Open System Settings** button.
+Choose **Later** to be reminded next launch, or **Don't show this again** to dismiss future notices. The notice appears at most once per launch.
+General settings also show whether the extension is enabled and offer **Open System Settings…** when it is not.
 
 | Badge | Meaning |
 | --- | --- |

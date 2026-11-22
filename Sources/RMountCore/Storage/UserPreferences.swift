@@ -124,6 +124,12 @@ public final class UserPreferences {
         }
     }
 
+    /// Suppress the Finder extension setup notice across launches. Off by default.
+    public var finderExtensionPromptDismissed: Bool {
+        get { defaults.bool(forKey: Self.key("finderExtensionPromptDismissed")) }
+        set { defaults.set(newValue, forKey: Self.key("finderExtensionPromptDismissed")) }
+    }
+
     public var lastUpdateCheck: Date? {
         get { defaults.object(forKey: Self.lastUpdateCheckKey) as? Date }
         set {
