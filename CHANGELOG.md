@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-21
+
 ### Changed
 
 - rclone logs are now kept for 30 days (one file per mount, next to the current log) instead of being overwritten on every mount.
