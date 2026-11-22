@@ -42,7 +42,7 @@ final class MainThreadResponsivenessTests: DebugTestCase {
         )])
         try keychain.set(remoteID: id, kind: .password, value: "pw")
         let m = SessionManager(store: store, keychain: keychain, mounter: Mounter(),
-                               logsDir: dir.appendingPathComponent("logs"), rcloneBinary: try fakeRclone())
+                               logsDir: dir.appendingPathComponent("logs"), rcloneBinary: try fakeRclone(), finderBadgeTracker: FinderBadgeTracker(writer: NoopFinderBadgeStatusWriter()))
         m.portWaitTimeout = 2
         try m.reload()
         return m

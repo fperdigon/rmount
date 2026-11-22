@@ -51,8 +51,30 @@ so nothing needs to be installed in the kernel.
 - **Live updates**: changes on the server show up in seconds in Responsive mode, or within a few minutes in the default Energy saving mode.
 - **Upload status**: open Transfers from the menu to see per-file upload progress, bytes left, speed and estimated time remaining, with a warning before quitting, unmounting or updating.
 - **Finder upload progress**: a small progress circle in Finder's list view follows real uploads, including queued files; enabled by default in General settings.
+- **Finder badges**: file status badges in icon, list and column views, using the included Finder extension.
 - **Auto-mount at login.**
 - **Passwords stored in your Keychain**, never on disk in plaintext.
+
+## Finder badges
+
+Switch on RMount in **System Settings > General > Login Items & Extensions**: on macOS 26 it is listed under **File Providers**; on older versions look under **Finder** (not verified there).
+In RMount's General settings, **Show status badges in Finder** is on by default. Both NFS and WebDAV mounts are supported.
+RMount prompts you to enable the extension when badges are on and the extension is not enabled, with an **Open System Settings** button.
+Choose **Later** to be reminded next launch, or **Don't show this again** to dismiss future notices. The notice appears at most once per launch.
+General settings also show whether the extension is enabled and offer **Open System Settings…** when it is not.
+
+| Badge | Meaning |
+| --- | --- |
+| Grey clock | Waiting to upload |
+| Blue progress circle | Uploading, in 25% steps; the final step stays at 75% until completion |
+| Green check | Uploaded; retained for 10 minutes |
+| Orange arrow | Retrying an upload |
+| Red warning | Upload has failed repeatedly (at least three tries) |
+| Crossed-out grey cloud | Upload status is unavailable because rclone is unreachable |
+
+Badges appear only for files RMount has seen in the upload queue; they do not indicate the sync state of every file on the remote.
+Each remote tracks up to 2,000 files, dropping the oldest uploaded badges first. Unmounting, quitting RMount, or switching badges off clears them.
+The extension needs enabling separately from the app. It is signed ad hoc with the app and is not notarized; follow the Gatekeeper instructions under **Download** before enabling it.
 
 ## How it works
 

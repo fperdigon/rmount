@@ -8,6 +8,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A first-run notice helps enable the Finder extension when status badges are on, with an option to remind you next launch or dismiss future notices. General settings show the extension's current status and link to System Settings.
+- Finder status badges in icon, list and column views for waiting, uploading, uploaded, retrying, error and offline files on NFS and WebDAV mounts. Enable the included Finder extension in System Settings; badges can be switched off in General settings.
 - Finder's list view shows a progress circle beside files while they upload to the remote, including files waiting in the upload queue. Enabled by default; configurable in General settings.
 
 ## [0.2.0] — 2026-11-21

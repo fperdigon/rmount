@@ -62,6 +62,7 @@ build_target() {
         CODE_SIGNING_ALLOWED=NO \
         CODE_SIGN_IDENTITY="" \
         CODE_SIGNING_REQUIRED=NO \
+        MARKETING_VERSION="$VERSION" \
         RMOUNT_BUILD_SHA="$BUILD_SHA" \
         RMOUNT_BUILD_KIND="$BUILD_KIND" \
         build \
@@ -81,7 +82,18 @@ build_target() {
 seal_app() {
     local app_path="$1"
     echo "==> codesign (ad-hoc) $app_path"
-    codesign --force --deep --sign - --entitlements App/rmount/Resources/rmount.entitlements "$app_path"
+    if [[ -f "$app_path/Contents/Resources/rclone" ]]; then
+        codesign --force --sign - "$app_path/Contents/Resources/rclone"
+    fi
+    # Sign sandboxed nested code first with its own entitlements. --deep on the app
+    # must not apply the host app's unsandboxed entitlements to the Finder extension.
+    local extension
+    for extension in "$app_path"/Contents/PlugIns/*.appex; do
+        [[ -d "$extension" ]] || { echo "error: Finder extension missing from $app_path" >&2; exit 1; }
+        codesign --force --sign - --options runtime \
+            --entitlements App/RMountFinder/RMountFinder.entitlements "$extension"
+    done
+    codesign --force --sign - --entitlements App/rmount/Resources/rmount.entitlements "$app_path"
     codesign --verify --deep --strict "$app_path"
 }
 

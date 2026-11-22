@@ -11,8 +11,10 @@ public final class SessionManager: ObservableObject {
     private var uploadGenerations: [UUID: UUID] = [:]
     private let controlClient: (RcloneProcess.Spawned) -> RcloneControlClient
     private let finderProgressPublisher: FinderProgressPublisher
+    private let finderBadgeTracker: FinderBadgeTracker
     private let preferences: UserPreferences
     private var finderProgressPreferenceCancellable: AnyCancellable?
+    private var finderBadgesPreferenceCancellable: AnyCancellable?
 
     private let store: RemoteStore
     private let keychain: KeychainService
@@ -36,6 +38,7 @@ public final class SessionManager: ObservableObject {
         hostKeyVerifier: HostKeyVerifier? = nil,
         preferences: UserPreferences = UserPreferences(),
         finderProgressFactory: FinderProgressFactory? = nil,
+        finderBadgeTracker: FinderBadgeTracker? = nil,
         controlClient: @escaping (RcloneProcess.Spawned) -> RcloneControlClient = {
             URLSessionRcloneControlClient(port: $0.rcPort, user: $0.rcUser, password: $0.rcPassword)
         }
@@ -50,6 +53,17 @@ public final class SessionManager: ObservableObject {
         self.preferences = preferences
         self.finderProgressPublisher = FinderProgressPublisher(
             factory: finderProgressFactory, isEnabled: preferences.showFinderUploadProgress)
+        self.finderBadgeTracker = finderBadgeTracker ?? FinderBadgeTracker(isEnabled: preferences.showFinderBadges)
+        self.finderBadgeTracker.isEnabled = preferences.showFinderBadges
+        finderBadgesPreferenceCancellable = NotificationCenter.default
+            .publisher(for: UserPreferences.showFinderBadgesDidChange)
+            .sink { [weak self] _ in
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated { self?.updateFinderBadgesPreference() }
+                } else {
+                    Task { @MainActor [weak self] in self?.updateFinderBadgesPreference() }
+                }
+            }
         finderProgressPreferenceCancellable = NotificationCenter.default
             .publisher(for: UserPreferences.showFinderUploadProgressDidChange)
             .sink { [weak self] _ in
@@ -73,6 +87,17 @@ public final class SessionManager: ObservableObject {
         }
     }
 
+    private func updateFinderBadgesPreference() {
+        let enabled = preferences.showFinderBadges
+        guard finderBadgeTracker.isEnabled != enabled else { return }
+        finderBadgeTracker.isEnabled = enabled
+        for session in sessions where session.mountpoint != nil {
+            finderBadgeTracker.sync(remoteID: session.id, remoteName: session.remote.name,
+                                    mountpoint: session.mountpoint,
+                                    status: uploadStatus[session.id] ?? UploadStatus())
+        }
+    }
+
     public func pendingUploads() -> [(remoteName: String, status: UploadStatus)] {
         sessions.compactMap { session in
             guard let status = uploadStatus[session.id], status.hasPending else { return nil }
@@ -82,11 +107,19 @@ public final class SessionManager: ObservableObject {
 
     func startUploadMonitor(remoteID: UUID, client: RcloneControlClient) {
         stopUploadMonitor(remoteID: remoteID)
+        if let session = sessions.first(where: { $0.id == remoteID }) {
+            finderBadgeTracker.sync(remoteID: remoteID, remoteName: session.remote.name,
+                                    mountpoint: session.mountpoint, status: UploadStatus())
+        }
         let generation = UUID()
         uploadGenerations[remoteID] = generation
         uploadMonitors[remoteID] = UploadMonitor(client: client) { [weak self] status in
             guard let self, self.uploadGenerations[remoteID] == generation else { return }
             self.uploadStatus[remoteID] = status
+            if let session = self.sessions.first(where: { $0.id == remoteID }) {
+                self.finderBadgeTracker.sync(remoteID: remoteID, remoteName: session.remote.name,
+                                            mountpoint: session.mountpoint, status: status)
+            }
             self.finderProgressPublisher.sync(
                 remoteID: remoteID,
                 mountpoint: self.sessions.first(where: { $0.id == remoteID })?.mountpoint,
@@ -109,6 +142,7 @@ public final class SessionManager: ObservableObject {
         uploadMonitors.removeValue(forKey: remoteID)?.stop()
         uploadStatus[remoteID] = nil
         finderProgressPublisher.clear(remoteID: remoteID)
+        finderBadgeTracker.clear(remoteID: remoteID)
     }
 
     public func reload() throws {
@@ -707,6 +741,7 @@ public final class SessionManager: ObservableObject {
         // republish Finder progress while the app is quitting.
         for remoteID in Array(uploadMonitors.keys) { stopUploadMonitor(remoteID: remoteID) }
         finderProgressPublisher.clearAll()
+        finderBadgeTracker.clearAll()
         for session in sessions {
             if case .mounted = session.status {
                 try? unmountBlocking(remoteID: session.id)

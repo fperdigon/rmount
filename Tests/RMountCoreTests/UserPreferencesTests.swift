@@ -83,4 +83,28 @@ final class UserPreferencesTests: DebugTestCase {
         prefs.showFinderUploadProgress = true
         wait(for: [unchanged], timeout: 0.05)
     }
+    func testFinderBadgesDefaultToEnabledAndPersistUnderCurrentKey() {
+        let prefs = UserPreferences(defaults: defaults)
+        XCTAssertTrue(prefs.showFinderBadges)
+        prefs.showFinderBadges = false
+        XCTAssertFalse(UserPreferences(defaults: defaults).showFinderBadges)
+        XCTAssertEqual(defaults.object(forKey: "rmount.showFinderBadges") as? Bool, false)
+        XCTAssertNil(defaults.object(forKey: "macsh.showFinderBadges"))
+        prefs.showFinderBadges = true
+        XCTAssertTrue(UserPreferences(defaults: defaults).showFinderBadges)
+    }
+
+    func testFinderBadgesNotifyOnlyWhenChanged() {
+        let prefs = UserPreferences(defaults: defaults)
+        let changed = expectation(forNotification: UserPreferences.showFinderBadgesDidChange,
+                                  object: prefs) { _ in !prefs.showFinderBadges }
+        prefs.showFinderBadges = false
+        wait(for: [changed], timeout: 1)
+        let unchanged = expectation(forNotification: UserPreferences.showFinderBadgesDidChange,
+                                    object: prefs)
+        unchanged.isInverted = true
+        prefs.showFinderBadges = false
+        wait(for: [unchanged], timeout: 0.05)
+    }
+
 }

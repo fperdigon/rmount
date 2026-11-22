@@ -6,6 +6,8 @@ public final class UserPreferences {
 
     public static let showFinderUploadProgressDidChange = Notification.Name("rmount.showFinderUploadProgressDidChange")
 
+    public static let showFinderBadgesDidChange = Notification.Name("rmount.showFinderBadgesDidChange")
+
     /// `legacyDomains` are the preference domains of the old bundle ids (`ai.macsh`). Values the
     /// user set there, under the old `macsh.*` key names, are copied once to the `rmount.*` keys;
     /// the old values stay where they are, so an older version keeps working.
@@ -34,6 +36,8 @@ public final class UserPreferences {
     private static var lastUpdateCheckKey: String { key(lastUpdateCheckName) }
     private static var skippedUpdateTagKey: String { key(skippedUpdateTagName) }
     private static var showFinderUploadProgressKey: String { key("showFinderUploadProgress") }
+
+    private static var showFinderBadgesKey: String { key("showFinderBadges") }
 
     private func migrateLegacyValues(from legacyDomains: [String]) {
         guard defaults.object(forKey: Self.migratedKey) == nil else { return }
@@ -106,6 +110,24 @@ public final class UserPreferences {
                 NotificationCenter.default.post(name: Self.showFinderUploadProgressDidChange, object: self)
             }
         }
+    }
+
+    /// Publish file status badges through the Finder Sync extension. On by default.
+    public var showFinderBadges: Bool {
+        get { defaults.object(forKey: Self.showFinderBadgesKey) as? Bool ?? true }
+        set {
+            let changed = newValue != showFinderBadges
+            defaults.set(newValue, forKey: Self.showFinderBadgesKey)
+            if changed {
+                NotificationCenter.default.post(name: Self.showFinderBadgesDidChange, object: self)
+            }
+        }
+    }
+
+    /// Suppress the Finder extension setup notice across launches. Off by default.
+    public var finderExtensionPromptDismissed: Bool {
+        get { defaults.bool(forKey: Self.key("finderExtensionPromptDismissed")) }
+        set { defaults.set(newValue, forKey: Self.key("finderExtensionPromptDismissed")) }
     }
 
     public var lastUpdateCheck: Date? {

@@ -199,7 +199,7 @@ final class RcloneConfImportManagerTests: DebugTestCase {
         let rclone = try FakeRclone.make(in: dir)
         let keychain = KeychainService(serviceName: "rmount.tests.\(UUID().uuidString)")
         let manager = SessionManager(store: RemoteStore(directory: dir), keychain: keychain, mounter: Mounter(),
-                                     logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone.binary)
+                                     logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone.binary, finderBadgeTracker: FinderBadgeTracker(writer: NoopFinderBadgeStatusWriter()))
         addDebugTeardownBlock { @MainActor in
             TestDebug.log("teardown main-actor body start")
             defer { TestDebug.log("teardown main-actor body finish") }
@@ -331,7 +331,7 @@ final class RcloneConfImportSMBManagerTests: DebugTestCase {
         let rclone = try FakeRclone.make(in: dir)
         let kc = KeychainService(serviceName: "rmount.tests.\(UUID().uuidString)")
         let m = SessionManager(store: RemoteStore(directory: dir), keychain: kc,
-                               mounter: Mounter(), logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone.binary)
+                               mounter: Mounter(), logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone.binary, finderBadgeTracker: FinderBadgeTracker(writer: NoopFinderBadgeStatusWriter()))
         addDebugTeardownBlock { @MainActor in
             TestDebug.log("teardown main-actor body start")
             defer { TestDebug.log("teardown main-actor body finish") }

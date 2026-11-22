@@ -24,6 +24,7 @@ WebDAV/Nextcloud, SMB and Google Drive (the generic `Backend.rclone` model; OAut
     are an interface; the app embeds its commit as `RMountBuildSHA`)
 - `App/rmount/` – SwiftUI app, generated with xcodegen from `App/project.yml`
   (flavors `rmount` with bundled rclone and `rmount-lite`).
+- `App/RMountFinder/` – Finder Sync badge extension; shares the snapshot schema with `RMountCore/Finder/`.
 - `Tests/RMountCoreTests/` – unit and integration tests.
 - `scripts/` – release build; `scripts/verify-dmg.sh` checks the built DMGs the way a user's Mac
   will (signature, layout, bundled rclone, Gatekeeper after a simulated download) and runs at

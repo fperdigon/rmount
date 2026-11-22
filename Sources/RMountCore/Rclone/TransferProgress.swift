@@ -57,6 +57,15 @@ public struct TransferProgress: Equatable {
     public let fraction: Double?
     public let speed: Double?
     public let eta: Double?
+    /// Attempts reported by the VFS queue; nil when rclone does not provide it.
+    public let tries: Int?
+
+    public init(path: String, state: State, bytesDone: Int64?, totalBytes: Int64?,
+                fraction: Double?, speed: Double?, eta: Double?, tries: Int? = nil) {
+        self.path = path; self.state = state; self.bytesDone = bytesDone
+        self.totalBytes = totalBytes; self.fraction = fraction
+        self.speed = speed; self.eta = eta; self.tries = tries
+    }
 
     static func isSidecar(_ path: String) -> Bool {
         (path as NSString).lastPathComponent.hasPrefix("._")
@@ -83,7 +92,7 @@ public struct TransferProgress: Equatable {
             else if fraction == 1 { state = .finishing }
             else { state = entry.uploading == true ? .uploading : .queued }
             return TransferProgress(path: entry.name ?? "Unknown file", state: state, bytesDone: done,
-                                    totalBytes: total, fraction: fraction, speed: speed, eta: eta)
+                                    totalBytes: total, fraction: fraction, speed: speed, eta: eta, tries: entry.tries)
         }
     }
 }

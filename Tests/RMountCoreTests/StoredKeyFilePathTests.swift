@@ -24,7 +24,7 @@ final class StoredKeyFilePathTests: DebugTestCase {
             keychain: keychain,
             mounter: Mounter(),
             logsDir: dir.appendingPathComponent("logs"),
-            rcloneBinary: URL(fileURLWithPath: "/usr/bin/true")
+            rcloneBinary: URL(fileURLWithPath: "/usr/bin/true"), finderBadgeTracker: FinderBadgeTracker(writer: NoopFinderBadgeStatusWriter())
         )
     }
 
