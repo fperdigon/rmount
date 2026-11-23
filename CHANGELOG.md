@@ -6,13 +6,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-
-- A first-run notice helps enable the Finder extension when status badges are on, with an option to remind you next launch or dismiss future notices. General settings show the extension's current status and link to System Settings.
-- Finder status badges in icon, list and column views for waiting, uploading, uploaded, retrying, error and offline files on NFS and WebDAV mounts. Enable the included Finder extension in System Settings; badges can be switched off in General settings.
-- Finder's list view shows a progress circle beside files while they upload to the remote, including files waiting in the upload queue. Enabled by default; configurable in General settings.
-
-## [0.2.0] — 2026-11-21
+## [0.2.0] — 2026-11-22
 
 ### Changed
 
@@ -28,6 +22,9 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A first-run notice helps enable the Finder extension when status badges are on, with an option to remind you next launch or dismiss future notices. General settings show the extension's current status and link to System Settings.
+- Finder status badges in icon, list and column views for waiting, uploading, uploaded, retrying, error and offline files on NFS and WebDAV mounts. Enable the included Finder extension in System Settings; badges can be switched off in General settings.
+- Finder's list view shows a progress circle beside files while they upload to the remote, including files waiting in the upload queue. Enabled by default; configurable in General settings.
 - A live Transfers window, available globally and from each remote's menu, shows per-file upload progress, speed, retries and finishing state. Unavailable telemetry is marked while pending uploads remain visible.
 - Upload status in the menu and a warning before quitting, unmounting or updating while files are still uploading. Upload counts and sizes exclude Finder's AppleDouble (`._`) sidecar files.
 - Homebrew casks moved to the combined tap `fperdigon/homebrew-tap` (`brew install --cask fperdigon/tap/rmount` and `fperdigon/tap/rmount-lite`).
