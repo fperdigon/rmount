@@ -86,7 +86,7 @@ public final class RcloneProcess {
         includeAuth: Bool
     ) throws -> Spawned {
         let tmpDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rmount-rclone-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent(TempNaming.rclonePrefix + TempNaming.tag + "-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         let configURL = tmpDir.appendingPathComponent("rclone.conf")
         do { try configText.write(to: configURL, atomically: true, encoding: .utf8) }
@@ -198,4 +198,13 @@ public final class RcloneProcess {
         guard getResult == 0 else { throw SpawnError.noFreePort }
         return Int(UInt16(bigEndian: addr.sin_port))
     }
+}
+
+/// Names of the temporary items RMount puts in `$TMPDIR`. They carry the app's bundle id so
+/// that rmount, rmount-lite or two builds running together never sweep each other's items.
+public enum TempNaming {
+    public static let rclonePrefix = "rmount-rclone-"
+    public static let keyPrefix = "rmount-key-"
+    public static let tag: String = Bundle.main.bundleIdentifier ?? "app"
+    public static func keyName(remoteID: UUID) -> String { "\(keyPrefix)\(tag)-\(remoteID.uuidString)" }
 }

@@ -454,7 +454,7 @@ final class SessionManagerTests: DebugTestCase {
         let result = await f.manager.testConnection(
             r, draft: .init(sftp: SFTPSecrets(password: nil, privateKeyPath: "PEMDATA", keyPassphrase: nil)))
         XCTAssertTrue(result.ok)
-        let keyPath = FileManager.default.temporaryDirectory.appendingPathComponent("rmount-key-\(r.id.uuidString)").path
+        let keyPath = FileManager.default.temporaryDirectory.appendingPathComponent(TempNaming.keyName(remoteID: r.id)).path
         XCTAssertFalse(FileManager.default.fileExists(atPath: keyPath))
     }
 
@@ -506,7 +506,7 @@ final class SessionManagerTests: DebugTestCase {
         guard case .failed = f.manager.sessions[0].status else {
             return XCTFail("expected failed status")
         }
-        let keyPath = FileManager.default.temporaryDirectory.appendingPathComponent("rmount-key-\(r.id.uuidString)").path
+        let keyPath = FileManager.default.temporaryDirectory.appendingPathComponent(TempNaming.keyName(remoteID: r.id)).path
         XCTAssertFalse(FileManager.default.fileExists(atPath: keyPath))
     }
 
