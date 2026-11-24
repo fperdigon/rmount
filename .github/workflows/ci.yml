@@ -4,16 +4,54 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}   # never cancel main's runs
 
 jobs:
+  # GitHub Free allows 5 concurrent macOS jobs (20 in total), so macOS work is gated here, on a cheap
+  # ubuntu runner: draft PRs run nothing, docs-only changes run no macOS job. A job skipped by `if:`
+  # counts as passed for the required checks (build-test, app-build); a workflow skipped by
+  # `paths-ignore` would stay "pending" and block the merge, so do not use paths-ignore.
+  changes:
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Does the change need the macOS jobs?
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
+          cat changed.txt
+          # Docs and repo metadata only: markdown, docs/, LICENSE, issue/PR templates.
+          if grep -v -E '(\.md$|^docs/|^LICENSE|^\.github/ISSUE_TEMPLATE/|^\.github/PULL_REQUEST_TEMPLATE|^\.github/CODEOWNERS$|^\.github/FUNDING\.yml$)' changed.txt | grep -q .; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Docs-only change: macOS jobs skipped."
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build-test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -25,13 +63,10 @@ jobs:
       - name: Swift version
         run: swift --version
 
-      - name: Script tests (scripts/bench-mount.py)
-        run: python3 -m unittest discover -s scripts/tests -v
-
       - name: Build
         run: swift build
 
-      - name: DMG verifier tests (scripts/verify-dmg.sh)
+      - name: Script tests (bench-mount, verify-dmg, release and cask scripts)
         run: python3 -m unittest discover -s scripts/tests -v
 
       - name: Test with coverage
@@ -89,6 +124,7 @@ jobs:
   # Real Nextcloud (native PHP + SQLite; containers can't run on Apple Silicon runners)
   # driven through rmount's actual WebDAV backend, rclone and macOS mounts.
   nextcloud-integration:
+    needs: build-test
     runs-on: macos-15
     timeout-minutes: 25
     steps:
@@ -118,6 +154,7 @@ jobs:
   # SFTP (asyncssh, password + key auth), FTP, S3 and SMB servers on localhost, driven through
   # rmount's real pipeline with NFS and WebDAV mounts.
   backends-integration:
+    needs: build-test
     runs-on: macos-15
     timeout-minutes: 25
     steps:
@@ -145,10 +182,30 @@ jobs:
         if: failure()
         run: grep -E "error:|failed \(" it.log | grep -v warning | cut -c1-1200 || true
 
-  # Azure Blob against Azurite (Microsoft's emulator), plus the raw-options escape hatch.
-  azure-integration:
+  # Azure Blob against Azurite (runs everywhere), then Backblaze B2 / Google Cloud Storage and Google
+  # Drive, which need test-account secrets and skip without them (PRs from forks never get secrets).
+  # One job instead of three: the secret-gated suites are skipped steps most of the time, and a
+  # separate macOS runner for a skipped step only costs a slot. Each suite is still its own step.
+  #   B2 / GCS: RMOUNT_IT_B2_ACCOUNT/_KEY/_BUCKET and RMOUNT_IT_GCS_CREDENTIALS/_BUCKET (optional
+  #   _PROJECT); no emulator exists for B2's native API.
+  #   Google Drive: RMOUNT_IT_GDRIVE_TOKEN (output of `rclone authorize drive`; optionally
+  #   _CLIENT_ID/_CLIENT_SECRET and _FOLDER).
+  # The old MACSH_IT_* secret names still work.
+  cloud-integration:
+    needs: build-test
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 40
+    env:
+      RMOUNT_IT_B2_ACCOUNT: ${{ secrets.RMOUNT_IT_B2_ACCOUNT || secrets.MACSH_IT_B2_ACCOUNT }}
+      RMOUNT_IT_B2_KEY: ${{ secrets.RMOUNT_IT_B2_KEY || secrets.MACSH_IT_B2_KEY }}
+      RMOUNT_IT_B2_BUCKET: ${{ secrets.RMOUNT_IT_B2_BUCKET || secrets.MACSH_IT_B2_BUCKET }}
+      RMOUNT_IT_GCS_CREDENTIALS: ${{ secrets.RMOUNT_IT_GCS_CREDENTIALS || secrets.MACSH_IT_GCS_CREDENTIALS }}
+      RMOUNT_IT_GCS_BUCKET: ${{ secrets.RMOUNT_IT_GCS_BUCKET || secrets.MACSH_IT_GCS_BUCKET }}
+      RMOUNT_IT_GCS_PROJECT: ${{ secrets.RMOUNT_IT_GCS_PROJECT || secrets.MACSH_IT_GCS_PROJECT }}
+      RMOUNT_IT_GDRIVE_TOKEN: ${{ secrets.RMOUNT_IT_GDRIVE_TOKEN || secrets.MACSH_IT_GDRIVE_TOKEN }}
+      RMOUNT_IT_GDRIVE_CLIENT_ID: ${{ secrets.RMOUNT_IT_GDRIVE_CLIENT_ID || secrets.MACSH_IT_GDRIVE_CLIENT_ID }}
+      RMOUNT_IT_GDRIVE_CLIENT_SECRET: ${{ secrets.RMOUNT_IT_GDRIVE_CLIENT_SECRET || secrets.MACSH_IT_GDRIVE_CLIENT_SECRET }}
+      RMOUNT_IT_GDRIVE_FOLDER: ${{ secrets.RMOUNT_IT_GDRIVE_FOLDER || secrets.MACSH_IT_GDRIVE_FOLDER }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -162,6 +219,24 @@ jobs:
           set -o pipefail
           swift test --filter AzureIntegrationTests 2>&1 | tee it.log
 
+      - name: Check for test accounts
+        run: |
+          [ -n "$RMOUNT_IT_B2_KEY" ] || echo "::warning::RMOUNT_IT_B2_* secrets not set - Backblaze B2 test skipped"
+          [ -n "$RMOUNT_IT_GCS_CREDENTIALS" ] || echo "::warning::RMOUNT_IT_GCS_* secrets not set - Google Cloud Storage test skipped"
+          [ -n "$RMOUNT_IT_GDRIVE_TOKEN" ] || echo "::warning::RMOUNT_IT_GDRIVE_TOKEN secret not set - Google Drive integration tests are skipped"
+
+      - name: Install rclone
+        if: env.RMOUNT_IT_B2_KEY != '' || env.RMOUNT_IT_GCS_CREDENTIALS != '' || env.RMOUNT_IT_GDRIVE_TOKEN != ''
+        run: brew install rclone
+
+      - name: B2 and GCS round-trip tests
+        if: env.RMOUNT_IT_B2_KEY != '' || env.RMOUNT_IT_GCS_CREDENTIALS != ''
+        run: swift test --filter NativeCloudAccountTests
+
+      - name: Google Drive round-trip and token refresh tests
+        if: env.RMOUNT_IT_GDRIVE_TOKEN != ''
+        run: swift test --filter GoogleDriveIntegrationTests
+
       - name: Diagnostics
         if: failure()
         run: |
@@ -172,70 +247,10 @@ jobs:
         if: failure()
         run: grep -E "error:|failed \(" it.log | grep -v warning | cut -c1-1200 || true
 
-  # Real Backblaze B2 / Google Cloud Storage. No emulator exists for B2's native API, so these need
-  # test accounts: repository secrets RMOUNT_IT_B2_ACCOUNT/_KEY/_BUCKET and RMOUNT_IT_GCS_CREDENTIALS/
-  # _BUCKET (optional _PROJECT). Without them the tests skip. The old MACSH_IT_* secret names still work.
-  native-cloud-integration:
-    runs-on: macos-15
-    timeout-minutes: 20
-    env:
-      RMOUNT_IT_B2_ACCOUNT: ${{ secrets.RMOUNT_IT_B2_ACCOUNT || secrets.MACSH_IT_B2_ACCOUNT }}
-      RMOUNT_IT_B2_KEY: ${{ secrets.RMOUNT_IT_B2_KEY || secrets.MACSH_IT_B2_KEY }}
-      RMOUNT_IT_B2_BUCKET: ${{ secrets.RMOUNT_IT_B2_BUCKET || secrets.MACSH_IT_B2_BUCKET }}
-      RMOUNT_IT_GCS_CREDENTIALS: ${{ secrets.RMOUNT_IT_GCS_CREDENTIALS || secrets.MACSH_IT_GCS_CREDENTIALS }}
-      RMOUNT_IT_GCS_BUCKET: ${{ secrets.RMOUNT_IT_GCS_BUCKET || secrets.MACSH_IT_GCS_BUCKET }}
-      RMOUNT_IT_GCS_PROJECT: ${{ secrets.RMOUNT_IT_GCS_PROJECT || secrets.MACSH_IT_GCS_PROJECT }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-
-      - name: Check for test accounts
-        run: |
-          [ -n "$RMOUNT_IT_B2_KEY" ] || echo "::warning::RMOUNT_IT_B2_* secrets not set - Backblaze B2 test skipped"
-          [ -n "$RMOUNT_IT_GCS_CREDENTIALS" ] || echo "::warning::RMOUNT_IT_GCS_* secrets not set - Google Cloud Storage test skipped"
-
-      - name: Install rclone
-        if: env.RMOUNT_IT_B2_KEY != '' || env.RMOUNT_IT_GCS_CREDENTIALS != ''
-        run: brew install rclone
-
-      - name: B2 and GCS round-trip tests
-        if: env.RMOUNT_IT_B2_KEY != '' || env.RMOUNT_IT_GCS_CREDENTIALS != ''
-        run: swift test --filter NativeCloudAccountTests
-
-  # Real Google Drive. Needs a test account: add the repository secret RMOUNT_IT_GDRIVE_TOKEN
-  # (output of `rclone authorize drive`; optionally RMOUNT_IT_GDRIVE_CLIENT_ID/_CLIENT_SECRET and
-  # RMOUNT_IT_GDRIVE_FOLDER). Without it the tests skip, and PRs from forks never get secrets.
-  gdrive-integration:
-    runs-on: macos-15
-    timeout-minutes: 20
-    env:
-      RMOUNT_IT_GDRIVE_TOKEN: ${{ secrets.RMOUNT_IT_GDRIVE_TOKEN || secrets.MACSH_IT_GDRIVE_TOKEN }}
-      RMOUNT_IT_GDRIVE_CLIENT_ID: ${{ secrets.RMOUNT_IT_GDRIVE_CLIENT_ID || secrets.MACSH_IT_GDRIVE_CLIENT_ID }}
-      RMOUNT_IT_GDRIVE_CLIENT_SECRET: ${{ secrets.RMOUNT_IT_GDRIVE_CLIENT_SECRET || secrets.MACSH_IT_GDRIVE_CLIENT_SECRET }}
-      RMOUNT_IT_GDRIVE_FOLDER: ${{ secrets.RMOUNT_IT_GDRIVE_FOLDER || secrets.MACSH_IT_GDRIVE_FOLDER }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-
-      - name: Check for test account
-        run: |
-          if [ -z "$RMOUNT_IT_GDRIVE_TOKEN" ]; then
-            echo "::warning::RMOUNT_IT_GDRIVE_TOKEN secret not set - Google Drive integration tests are skipped"
-          fi
-
-      - name: Install rclone
-        if: env.RMOUNT_IT_GDRIVE_TOKEN != ''
-        run: brew install rclone
-
-      - name: Google Drive round-trip and token refresh tests
-        if: env.RMOUNT_IT_GDRIVE_TOKEN != ''
-        run: swift test --filter GoogleDriveIntegrationTests
-
   # Compiles the SwiftUI app (rmount-lite shares all sources with rmount). The package tests do
   # not build App/, so without this a broken view only shows up in the post-merge release run.
   app-build:
+    needs: build-test
     runs-on: macos-15
     timeout-minutes: 25
     steps:
