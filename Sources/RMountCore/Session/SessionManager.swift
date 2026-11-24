@@ -992,7 +992,7 @@ public final class SessionManager: ObservableObject {
             let id = session.id
             group.enter()
             DispatchQueue.global(qos: .userInitiated).async {
-                do { try mounter.unmount(mountpoint: mp) }
+                do { try mounter.unmount(mountpoint: mp, force: true) }
                 catch { failed.lock(); failedIDs.insert(id); failed.unlock() }
                 group.leave()
             }
