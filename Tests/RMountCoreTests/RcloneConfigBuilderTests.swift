@@ -19,6 +19,27 @@ final class RcloneConfigBuilderTests: DebugTestCase {
         XCTAssertFalse(cfg.contains("hunter2"))
     }
 
+    func testRejectsLineBreaksInValues() {
+        func sftp(host: String = "h", user: String = "u") -> Remote {
+            Remote(id: UUID(), name: "n",
+                   backend: .sftp(SFTPConfig(host: host, port: 22, user: user, remotePath: "/", authKind: .password)),
+                   mountProtocol: .webdav, autoMount: false)
+        }
+        let secrets = SFTPSecrets(password: "p", privateKeyPath: nil, keyPassphrase: nil)
+        for r in [sftp(host: "h\nssh = evil"), sftp(user: "u\r\nssh = evil"), sftp(host: "h\u{0}")] {
+            XCTAssertThrowsError(try RcloneConfigBuilder.build(remote: r, sftpSecrets: secrets)) {
+                guard case RcloneConfigError.invalidValue = $0 else { return XCTFail("\($0)") }
+            }
+        }
+        let err = RcloneConfigError.invalidValue("host")
+        XCTAssertTrue(err.errorDescription?.contains("host") == true)
+        // FTP, S3 and generic options are checked too.
+        let ftp = Remote(id: UUID(), name: "n",
+                         backend: .ftp(FTPConfig(host: "h\nx = y", port: 21, user: "u", remotePath: "/", tlsMode: .off)),
+                         mountProtocol: .webdav, autoMount: false)
+        XCTAssertThrowsError(try RcloneConfigBuilder.build(remote: ftp, secrets: BackendSecrets(ftp: FTPSecrets(password: "p"))))
+    }
+
     func testSFTPKeyFileAuth() throws {
         let r = Remote(
             id: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,

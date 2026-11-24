@@ -16,10 +16,12 @@ public protocol HostKeyPrompter: AnyObject {
     func confirmChange(host: String, port: Int, oldFingerprint: String, newFingerprint: String) -> Bool
 }
 
-public enum HostKeyError: Error, LocalizedError {
+public enum HostKeyError: Error, Equatable, LocalizedError {
     case keyscanFailed(stderr: String)
     case rejectedByUser
     case fingerprintComputationFailed
+    case verifierUnavailable
+    case invalidHost
 
     public var errorDescription: String? {
         switch self {
@@ -31,6 +33,10 @@ public enum HostKeyError: Error, LocalizedError {
             return "Host key was not accepted"
         case .fingerprintComputationFailed:
             return "Could not compute the host key fingerprint"
+        case .verifierUnavailable:
+            return "Host key checking is not available, so the SFTP connection was not started."
+        case .invalidHost:
+            return "The host name is not valid."
         }
     }
 }
@@ -73,6 +79,10 @@ public final class HostKeyVerifier {
 
     /// Blocking: runs `ssh-keyscan` / `ssh-keygen`. Safe to call from a background thread.
     nonisolated public func inspect(host: String, port: Int) throws -> Inspection {
+        // A host starting with "-" would be read by ssh-keyscan as an option.
+        guard !host.hasPrefix("-"), !host.unicodeScalars.contains(where: { RemoteName.isControl($0) }) else {
+            throw HostKeyError.invalidHost
+        }
         let existing = readExistingLines(host: host, port: port)
         let liveLines = try keyscan(host: host, port: port)
         guard !liveLines.isEmpty else {

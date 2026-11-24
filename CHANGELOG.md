@@ -6,6 +6,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- Remote names are checked on add, edit and import, and the NFS mountpoint is built from a sanitized name that must stay under `~/rmount`, so a name such as `a/b` or `../x` no longer breaks mounting or escapes the folder.
+- Line breaks and control characters in host, user and option values are refused instead of being written into the rclone config.
+- An SFTP connection is never started without host-key checking.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed

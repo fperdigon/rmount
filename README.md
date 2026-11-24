@@ -55,6 +55,13 @@ so nothing needs to be installed in the kernel.
 - **Auto-mount at login.**
 - **Passwords stored in your Keychain**, never on disk in plaintext.
 
+## Security note: local NFS
+
+An NFS remote is served by rclone on `127.0.0.1` with no authentication (the NFS protocol has none), so
+any local user who can see the port, for example in `ps`, can mount it. This matters only on Macs with
+several user accounts. On those, choose **WebDAV** for the mount protocol: it is protected by a per-mount
+password. On a single-user Mac, other local users are not a concern.
+
 ## Finder badges
 
 Switch on RMount in **System Settings > General > Login Items & Extensions**: on macOS 26 it is listed under **File Providers**; on older versions look under **Finder** (not verified there).

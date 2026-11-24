@@ -81,6 +81,7 @@ final class SessionManagerTests: DebugTestCase {
             for s in manager.sessions { try? manager.delete(s.id) }
             try? FileManager.default.removeItem(at: dir)
         }
+        manager.allowMissingHostKeyVerifier = true
         return Fixture(manager: manager, mounter: mounter, keychain: keychain, store: store, rclone: rclone, dir: dir)
     }
 
@@ -109,6 +110,29 @@ final class SessionManagerTests: DebugTestCase {
         XCTAssertEqual(try f.keychain.get(remoteID: r.id, kind: .password), "pw")
         XCTAssertEqual(try f.keychain.get(remoteID: r.id, kind: .keyPassphrase), "pp")
         XCTAssertEqual(try f.keychain.get(remoteID: r.id, kind: .privateKey), "/k")
+    }
+
+    func testAddAndUpdateRejectBadNames() throws {
+        let f = try makeFixture()
+        for name in ["", "..", "a/b", "x\ny"] {
+            XCTAssertThrowsError(try f.manager.add(makeRemote(name: name, backend: sftpBackend()), sftpSecrets: pw), name)
+        }
+        XCTAssertTrue(f.manager.sessions.isEmpty)
+        var r = makeRemote(backend: sftpBackend())
+        try f.manager.add(r, sftpSecrets: pw)
+        r.name = "../evil"
+        XCTAssertThrowsError(try f.manager.update(r))
+        XCTAssertEqual(f.manager.sessions.first?.remote.name, "test-remote")
+    }
+
+    func testSFTPMountWithoutHostKeyVerifierFails() async throws {
+        let f = try makeFixture()
+        f.manager.allowMissingHostKeyVerifier = false
+        let r = makeRemote(backend: sftpBackend())
+        try f.manager.add(r, sftpSecrets: pw)
+        let err = await thrownError { try await f.manager.mount(remoteID: r.id) }
+        XCTAssertEqual(err as? HostKeyError, .verifierUnavailable)
+        XCTAssertTrue(f.mounter.webdavMounts.isEmpty)
     }
 
     func testAddStoresS3AndFTPSecrets() throws {
