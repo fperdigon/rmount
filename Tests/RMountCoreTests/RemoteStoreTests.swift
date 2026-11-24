@@ -52,7 +52,8 @@ final class RemoteStoreTests: DebugTestCase {
     private func goodRemote() -> Remote {
         Remote(id: UUID(uuidString: goodID)!, name: "good",
                backend: .sftp(SFTPConfig(host: "h", port: 22, user: "u", remotePath: "/", authKind: .password)),
-               mountProtocol: .webdav, autoMount: false)
+               mountProtocol: .webdav, autoMount: false,
+               cacheMigrated: false)   // the JSON fixtures predate the field, which decodes as false
     }
 
     func testUnknownBackendIsSkippedAndOthersLoad() throws {
