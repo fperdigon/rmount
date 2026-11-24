@@ -8,7 +8,20 @@ private final class FakeMounter: Mounter {
     private var _webdavMounts: [(port: Int, baseurl: String)] = []
     private var _nfsMounts: [(port: Int, mountpoint: String)] = []
     private var _unmounted: [String] = []
+    private var _forced: [Bool] = []
+    private var _busy = false
     private var _reconciled: [String] = []
+    private var _entered = false
+    private let gate = DispatchSemaphore(value: 0)
+    private var _gated = false
+
+    /// Makes mountWebDAV block (off the main thread) until `releaseMount()`.
+    var gateMount: Bool {
+        get { lock.withLock { _gated } }
+        set { lock.withLock { _gated = newValue } }
+    }
+    var enteredMount: Bool { lock.withLock { _entered } }
+    func releaseMount() { gate.signal() }
 
     var failMount: Bool {
         get { lock.withLock { _failMount } }
@@ -17,10 +30,20 @@ private final class FakeMounter: Mounter {
     var webdavMounts: [(port: Int, baseurl: String)] { lock.withLock { _webdavMounts } }
     var nfsMounts: [(port: Int, mountpoint: String)] { lock.withLock { _nfsMounts } }
     var unmounted: [String] { lock.withLock { _unmounted } }
+    var forced: [Bool] { lock.withLock { _forced } }
+    /// When set, a non-forced unmount throws `.busy` like a volume with open files.
+    var busy: Bool {
+        get { lock.withLock { _busy } }
+        set { lock.withLock { _busy = newValue } }
+    }
     var reconciled: [String] { lock.withLock { _reconciled } }
 
     override func mountWebDAV(host: String, port: Int, baseurl: String, user: String, password: String) throws -> String {
         if failMount { throw Mounter.MountError.netFSFailed(status: 1) }
+        if gateMount {
+            lock.withLock { _entered = true }
+            gate.wait()
+        }
         lock.withLock { _webdavMounts.append((port, baseurl)) }
         return "/Volumes/fake\(baseurl)"
     }
@@ -33,8 +56,16 @@ private final class FakeMounter: Mounter {
     override func resolveMountpoint(name: String) throws -> String { "/Volumes/\(name)" }
 
     override func reconcileLeftoverNFSMounts() -> [String] { [] }
+    override func reconcileOrphanedRclone() -> OrphanReaper.Report { OrphanReaper.Report() }
 
-    override func unmount(mountpoint: String) throws { lock.withLock { _unmounted.append(mountpoint) } }
+    /// Seconds each `unmount` blocks (simulates a slow or hung diskutil).
+    var unmountDelay: TimeInterval = 0
+
+    override func unmount(mountpoint: String, force: Bool = false) throws {
+        if unmountDelay > 0 { Thread.sleep(forTimeInterval: unmountDelay) }
+        if busy && !force { throw Mounter.MountError.busy(mountpoint: mountpoint) }
+        lock.withLock { _unmounted.append(mountpoint); _forced.append(force) }
+    }
 
     @discardableResult
     override func reconcileStaleMount(volumeName: String) -> Bool {
@@ -48,7 +79,7 @@ final class SessionManagerTests: DebugTestCase {
     private struct Fixture {
         let manager: SessionManager
         let mounter: FakeMounter
-        let keychain: KeychainService
+        let keychain: SecretStore
         let store: RemoteStore
         let rclone: FakeRclone
         let dir: URL
@@ -57,16 +88,19 @@ final class SessionManagerTests: DebugTestCase {
     private func makeFixture(controlClient: RcloneControlClient? = nil,
                              finderProgressFactory: FinderProgressFactory? = nil,
                              finderBadgeTracker: FinderBadgeTracker? = nil,
-                             preferences: UserPreferences? = nil) throws -> Fixture {
+                             preferences: UserPreferences? = nil,
+                             legacyCacheRoot: URL? = nil) throws -> Fixture {
         try FakeRclone.requirePython()
         let dir = try makeTempDir()
         let rclone = try FakeRclone.make(in: dir)
-        let keychain = KeychainService(serviceName: "rmount.tests.\(UUID().uuidString)")
+        let keychain = InMemorySecretStore()
         let store = RemoteStore(directory: dir)
         let mounter = FakeMounter()
         let manager = SessionManager(
             store: store, keychain: keychain, mounter: mounter,
-            logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone.binary,
+            logsDir: dir.appendingPathComponent("logs"),
+            legacyCacheRoot: legacyCacheRoot ?? dir.appendingPathComponent("no-legacy-cache"),
+            rcloneBinary: rclone.binary,
             preferences: preferences ?? UserPreferences(),
             finderProgressFactory: finderProgressFactory ?? SessionFinderProgressFactory(),
             finderBadgeTracker: finderBadgeTracker ?? FinderBadgeTracker(writer: SessionFinderBadgeWriter()),
@@ -78,9 +112,10 @@ final class SessionManagerTests: DebugTestCase {
             TestDebug.log("teardown main-actor body start")
             defer { TestDebug.log("teardown main-actor body finish") }
             manager.shutdownAll()
-            for s in manager.sessions { try? manager.delete(s.id) }
+            for s in manager.sessions { try? await manager.delete(s.id) }
             try? FileManager.default.removeItem(at: dir)
         }
+        manager.allowMissingHostKeyVerifier = true
         return Fixture(manager: manager, mounter: mounter, keychain: keychain, store: store, rclone: rclone, dir: dir)
     }
 
@@ -109,6 +144,29 @@ final class SessionManagerTests: DebugTestCase {
         XCTAssertEqual(try f.keychain.get(remoteID: r.id, kind: .password), "pw")
         XCTAssertEqual(try f.keychain.get(remoteID: r.id, kind: .keyPassphrase), "pp")
         XCTAssertEqual(try f.keychain.get(remoteID: r.id, kind: .privateKey), "/k")
+    }
+
+    func testAddAndUpdateRejectBadNames() throws {
+        let f = try makeFixture()
+        for name in ["", "..", "a/b", "x\ny"] {
+            XCTAssertThrowsError(try f.manager.add(makeRemote(name: name, backend: sftpBackend()), sftpSecrets: pw), name)
+        }
+        XCTAssertTrue(f.manager.sessions.isEmpty)
+        var r = makeRemote(backend: sftpBackend())
+        try f.manager.add(r, sftpSecrets: pw)
+        r.name = "../evil"
+        XCTAssertThrowsError(try f.manager.update(r))
+        XCTAssertEqual(f.manager.sessions.first?.remote.name, "test-remote")
+    }
+
+    func testSFTPMountWithoutHostKeyVerifierFails() async throws {
+        let f = try makeFixture()
+        f.manager.allowMissingHostKeyVerifier = false
+        let r = makeRemote(backend: sftpBackend())
+        try f.manager.add(r, sftpSecrets: pw)
+        let err = await thrownError { try await f.manager.mount(remoteID: r.id) }
+        XCTAssertEqual(err as? HostKeyError, .verifierUnavailable)
+        XCTAssertTrue(f.mounter.webdavMounts.isEmpty)
     }
 
     func testAddStoresS3AndFTPSecrets() throws {
@@ -182,11 +240,11 @@ final class SessionManagerTests: DebugTestCase {
         XCTAssertThrowsError(try f.manager.update(makeRemote(backend: sftpBackend())))
     }
 
-    func testDeleteRemovesRemoteAndSecrets() throws {
+    func testDeleteRemovesRemoteAndSecrets() async throws {
         let f = try makeFixture()
         let r = makeRemote(backend: sftpBackend())
         try f.manager.add(r, sftpSecrets: pw)
-        try f.manager.delete(r.id)
+        try await f.manager.delete(r.id)
         XCTAssertTrue(f.manager.sessions.isEmpty)
         XCTAssertTrue(try f.store.load().isEmpty)
         XCTAssertNil(try f.keychain.get(remoteID: r.id, kind: .password))
@@ -239,6 +297,44 @@ final class SessionManagerTests: DebugTestCase {
         XCTAssertEqual(f.mounter.unmounted, ["/Volumes/fake/my server"])
         proc.debugWaitUntilExit()
         XCTAssertFalse(proc.isRunning)
+    }
+
+    func testMountRetriesWithFreshPortWhenRcloneCannotBind() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(name: "racy", backend: sftpBackend())
+        try f.manager.add(r, sftpSecrets: pw)
+        try "1".write(to: f.dir.appendingPathComponent("bind-fail-once.txt"), atomically: true, encoding: .utf8)
+
+        try await f.manager.mount(remoteID: r.id)
+
+        let session = try XCTUnwrap(f.manager.sessions.first)
+        XCTAssertEqual(session.status, .mounted(at: "/Volumes/fake/racy"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.dir.appendingPathComponent("bind-fail-once.txt").path))
+        try await f.manager.unmount(remoteID: r.id)
+    }
+
+    func testIsBindFailureReadsLog() throws {
+        let dir = try makeTempDir()
+        let log = dir.appendingPathComponent("l.log")
+        XCTAssertFalse(SessionManager.isBindFailure(logFile: log))
+        try "listen tcp 127.0.0.1:5: bind: Address already in use\n".write(to: log, atomically: true, encoding: .utf8)
+        XCTAssertTrue(SessionManager.isBindFailure(logFile: log))
+        try "some other error".write(to: log, atomically: true, encoding: .utf8)
+        XCTAssertFalse(SessionManager.isBindFailure(logFile: log))
+    }
+
+    func testListeningPIDsReportsTheListener() throws {
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        defer { close(sock) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        _ = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+        XCTAssertEqual(listen(sock, 1), 0)
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(sock, $0, &len) } }
+        let port = Int(UInt16(bigEndian: addr.sin_port))
+        XCTAssertEqual(SessionManager.listeningPIDs(port: port), [getpid()])
     }
 
     func testMountS3PassesSecretViaEnvAndBuildsRemotePath() async throws {
@@ -306,14 +402,14 @@ final class SessionManagerTests: DebugTestCase {
         XCTAssertEqual(try f.keychain.get(remoteID: r.id, kind: .option("pass")), "newpw")
     }
 
-    func testDeleteRemovesGenericAndS3Secrets() throws {
+    func testDeleteRemovesGenericAndS3Secrets() async throws {
         let f = try makeFixture()
         let w = makeRemote(backend: webdavBackend())
         let s3 = makeRemote(backend: s3Backend())
         try f.manager.add(w, optionSecrets: ["pass": "pw"])
         try f.manager.add(s3, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
-        try f.manager.delete(w.id)
-        try f.manager.delete(s3.id)
+        try await f.manager.delete(w.id)
+        try await f.manager.delete(s3.id)
         XCTAssertNil(try f.keychain.get(remoteID: w.id, kind: .option("pass")))
         XCTAssertNil(try f.keychain.get(remoteID: s3.id, kind: .s3AccessKeyID))
         XCTAssertNil(try f.keychain.get(remoteID: s3.id, kind: .s3SecretAccessKey))
@@ -396,6 +492,107 @@ final class SessionManagerTests: DebugTestCase {
         try await f.manager.unmount(remoteID: r.id)
     }
 
+    func testMountGivesEachRemoteItsOwnCacheDir() async throws {
+        let f = try makeFixture()
+        let a = makeRemote(backend: ftpBackend())
+        try f.manager.add(a, ftpSecrets: FTPSecrets(password: "pw"))
+        try await f.manager.mount(remoteID: a.id)
+        let lines = f.rclone.recordedLines()
+        let i = try XCTUnwrap(lines.firstIndex(of: "--cache-dir"))
+        XCTAssertEqual(lines[i + 1], f.manager.cacheDir(for: a.id).path)
+        XCTAssertEqual(f.manager.cacheDir(for: a.id).lastPathComponent, a.id.uuidString)
+        XCTAssertEqual(f.manager.cacheDir(for: a.id).deletingLastPathComponent().lastPathComponent, "cache")
+        XCTAssertNotEqual(f.manager.cacheDir(for: a.id), f.manager.cacheDir(for: UUID()))
+        try await f.manager.unmount(remoteID: a.id)
+    }
+
+    func testDeleteRemovesCacheDirWhenNothingPending() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: sftpBackend())
+        try f.manager.add(r, sftpSecrets: pw)
+        let dir = f.manager.cacheDir(for: r.id)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try await f.manager.delete(r.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
+    }
+
+    func testDeleteKeepsCacheDirWhenUploadsPending() async throws {
+        let client = SessionControlClient()
+        let f = try makeFixture(controlClient: client)
+        let r = makeRemote(backend: sftpBackend())
+        try f.manager.add(r, sftpSecrets: pw)
+        let dir = f.manager.cacheDir(for: r.id)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        f.manager.startUploadMonitor(remoteID: r.id, client: client)
+        try await waitForUploads { f.manager.uploadStatus[r.id]?.queuedCount == 1 }
+        try await f.manager.delete(r.id)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path))
+    }
+
+    private func legacyCache(withEntry: Bool) throws -> URL {
+        let root = try makeTempDir().appendingPathComponent("legacy")
+        let vfs = root.appendingPathComponent("vfs/r/pub", isDirectory: true)
+        try FileManager.default.createDirectory(at: vfs, withIntermediateDirectories: true)
+        if withEntry { try Data("dirty".utf8).write(to: vfs.appendingPathComponent("file.bin")) }
+        return root
+    }
+
+    func testLegacyCacheEntriesKeepOldCacheUntilQueueEmpty() async throws {
+        let legacy = try legacyCache(withEntry: true)
+        let client = SessionControlClient()
+        let f = try makeFixture(controlClient: client, legacyCacheRoot: legacy)
+        var r = makeRemote(backend: ftpBackend())
+        r.cacheMigrated = false
+        try f.manager.add(r, ftpSecrets: FTPSecrets(password: "pw"))
+        try await f.manager.mount(remoteID: r.id)
+        XCTAssertFalse(f.rclone.recordedLines().contains("--cache-dir"))
+        // Pending upload: stays on the legacy cache.
+        try await waitForUploads { f.manager.uploadStatus[r.id]?.queuedCount == 1 }
+        XCTAssertFalse(try f.store.load()[0].cacheMigrated)
+        // Queue drains: flagged for the next mount; the old cache is untouched.
+        await client.drain()
+        await f.manager.refreshUploadStatus()
+        try await waitForUploads { (try? f.store.load()[0].cacheMigrated) == true }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.appendingPathComponent("vfs/r/pub/file.bin").path))
+        try await f.manager.unmount(remoteID: r.id)
+        try await f.manager.mount(remoteID: r.id)
+        XCTAssertTrue(f.rclone.recordedLines().contains("--cache-dir"))
+        try await f.manager.unmount(remoteID: r.id)
+    }
+
+    func testNoLegacyEntriesUsesOwnCacheDirAtOnce() async throws {
+        let f = try makeFixture(legacyCacheRoot: try legacyCache(withEntry: false))
+        var r = makeRemote(backend: ftpBackend())
+        r.cacheMigrated = false
+        try f.manager.add(r, ftpSecrets: FTPSecrets(password: "pw"))
+        try await f.manager.mount(remoteID: r.id)
+        XCTAssertTrue(f.rclone.recordedLines().contains("--cache-dir"))
+        XCTAssertTrue(try f.store.load()[0].cacheMigrated)
+        try await f.manager.unmount(remoteID: r.id)
+    }
+
+    func testLegacyCacheMatchingRules() throws {
+        let root = try legacyCache(withEntry: false)
+        let fm = FileManager.default
+        XCTAssertFalse(LegacyVFSCache.hasEntries(root: root, remotePath: "/home/x"))
+        try fm.createDirectory(at: root.appendingPathComponent("vfsMeta/r{abc12}/home/x"), withIntermediateDirectories: true)
+        try Data("m".utf8).write(to: root.appendingPathComponent("vfsMeta/r{abc12}/home/x/a"))
+        XCTAssertTrue(LegacyVFSCache.hasEntries(root: root, remotePath: "/home/x"))
+        XCTAssertFalse(LegacyVFSCache.hasEntries(root: root, remotePath: "other/place"))
+        // Unusual characters cannot be matched safely: any content counts.
+        XCTAssertTrue(LegacyVFSCache.hasEntries(root: root, remotePath: "caf\u{e9}/x"))
+        XCTAssertFalse(LegacyVFSCache.hasEntries(root: root.appendingPathComponent("missing"), remotePath: ""))
+    }
+
+    func testRemoteDecodesMissingCacheMigratedAsFalse() throws {
+        let r = makeRemote(backend: sftpBackend())
+        var obj = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(r)) as? [String: Any])
+        XCTAssertEqual(obj["cacheMigrated"] as? Bool, true)
+        obj["cacheMigrated"] = nil
+        let old = try JSONDecoder().decode(Remote.self, from: JSONSerialization.data(withJSONObject: obj))
+        XCTAssertFalse(old.cacheMigrated)
+    }
+
     func testMountWithoutOptionsHasNoReadOnlyOrBwlimit() async throws {
         let f = try makeFixture()
         let r = makeRemote(backend: ftpBackend(), proto: .nfs)
@@ -454,7 +651,7 @@ final class SessionManagerTests: DebugTestCase {
         let result = await f.manager.testConnection(
             r, draft: .init(sftp: SFTPSecrets(password: nil, privateKeyPath: "PEMDATA", keyPassphrase: nil)))
         XCTAssertTrue(result.ok)
-        let keyPath = FileManager.default.temporaryDirectory.appendingPathComponent("rmount-key-\(r.id.uuidString)").path
+        let keyPath = FileManager.default.temporaryDirectory.appendingPathComponent(TempNaming.keyName(remoteID: r.id)).path
         XCTAssertFalse(FileManager.default.fileExists(atPath: keyPath))
     }
 
@@ -506,7 +703,7 @@ final class SessionManagerTests: DebugTestCase {
         guard case .failed = f.manager.sessions[0].status else {
             return XCTFail("expected failed status")
         }
-        let keyPath = FileManager.default.temporaryDirectory.appendingPathComponent("rmount-key-\(r.id.uuidString)").path
+        let keyPath = FileManager.default.temporaryDirectory.appendingPathComponent(TempNaming.keyName(remoteID: r.id)).path
         XCTAssertFalse(FileManager.default.fileExists(atPath: keyPath))
     }
 
@@ -522,16 +719,192 @@ final class SessionManagerTests: DebugTestCase {
         XCTAssertEqual(f.mounter.unmounted.count, 1)
     }
 
+    func testShutdownAllReturnsWithinDeadlineWhenUnmountHangs() async throws {
+        let f = try makeFixture()
+        let a = makeRemote(backend: s3Backend())
+        let b = makeRemote(backend: s3Backend())
+        for r in [a, b] {
+            try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+            try await f.manager.mount(remoteID: r.id)
+        }
+        f.mounter.unmountDelay = 4
+
+        let start = Date()
+        f.manager.shutdownAll(deadline: 0.5)
+
+        // Parallel and bounded: two 4 s unmounts must not take 8 s, nor even 4 s.
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2.5)
+    }
+
+    func testShutdownAllUnmountsInParallel() async throws {
+        let f = try makeFixture()
+        for _ in 0..<3 {
+            let r = makeRemote(backend: s3Backend())
+            try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+            try await f.manager.mount(remoteID: r.id)
+        }
+        f.mounter.unmountDelay = 0.6
+
+        let start = Date()
+        f.manager.shutdownAll(deadline: 5)
+
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1.5)
+        XCTAssertEqual(f.mounter.unmounted.count, 3)
+        XCTAssertTrue(f.manager.sessions.allSatisfy { $0.status == .idle })
+    }
+
+    func testDeleteDoesNotBlockTheMainActor() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        try await f.manager.mount(remoteID: r.id)
+        f.mounter.unmountDelay = 1.0
+
+        var maxGap: TimeInterval = 0
+        var last = Date()
+        var running = true
+        let heartbeat = Task { @MainActor in
+            while running {
+                let now = Date()
+                maxGap = max(maxGap, now.timeIntervalSince(last))
+                last = now
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+        try await f.manager.delete(r.id)
+        running = false
+        await heartbeat.value
+
+        XCTAssertLessThan(maxGap, 0.5, "main actor was blocked while deleting")
+        XCTAssertEqual(f.mounter.unmounted.count, 1)
+        XCTAssertTrue(f.manager.sessions.isEmpty)
+    }
+
+    func testBusyUnmountThrowsAndKeepsSessionMountedThenForceSucceeds() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        try await f.manager.mount(remoteID: r.id)
+        f.mounter.busy = true
+
+        let err = await thrownError { try await f.manager.unmount(remoteID: r.id) }
+        guard case .busy? = err as? Mounter.MountError else { return XCTFail("expected busy, got \(String(describing: err))") }
+        if case .mounted = f.manager.sessions[0].status {} else { XCTFail("still mounted expected") }
+        XCTAssertTrue(f.mounter.unmounted.isEmpty, "a plain unmount must not force")
+
+        try await f.manager.unmount(remoteID: r.id, force: true)
+        XCTAssertEqual(f.manager.sessions[0].status, .idle)
+        XCTAssertEqual(f.mounter.forced, [true])
+    }
+
+    func testQuitForcesUnmountEvenWhenBusy() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        try await f.manager.mount(remoteID: r.id)
+        f.mounter.busy = true
+
+        f.manager.shutdownAll()
+
+        XCTAssertEqual(f.manager.sessions[0].status, .idle)
+        XCTAssertEqual(f.mounter.forced, [true])
+    }
+
     func testDeleteMountedRemoteUnmountsFirst() async throws {
         let f = try makeFixture()
         let r = makeRemote(backend: s3Backend())
         try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
         try await f.manager.mount(remoteID: r.id)
 
-        try f.manager.delete(r.id)
+        try await f.manager.delete(r.id)
 
         XCTAssertEqual(f.mounter.unmounted.count, 1)
         XCTAssertTrue(f.manager.sessions.isEmpty)
+    }
+
+    // MARK: - Cancelling a mount that is starting
+
+    /// Starts a mount whose NetFS call is parked, and waits until it is parked.
+    private func startGatedMount(_ f: Fixture, _ r: Remote) async throws -> Task<Void, Error> {
+        f.mounter.gateMount = true
+        let task = Task { @MainActor in try await f.manager.mount(remoteID: r.id) }
+        for _ in 0..<200 where !f.mounter.enteredMount { try await Task.sleep(nanoseconds: 50_000_000) }
+        XCTAssertTrue(f.mounter.enteredMount, "mount never reached NetFS")
+        return task
+    }
+
+    func testDeleteDuringStartStopsRcloneAndUnmounts() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        let task = try await startGatedMount(f, r)
+        let proc = try XCTUnwrap(f.manager.mountAttempts[r.id]?.process)
+        XCTAssertTrue(f.manager.isMountInFlight(remoteID: r.id))
+
+        try await f.manager.delete(r.id)
+        f.mounter.releaseMount()
+        try await task.value
+
+        XCTAssertTrue(f.manager.sessions.isEmpty)
+        XCTAssertFalse(f.manager.isMountInFlight(remoteID: r.id))
+        XCTAssertEqual(f.mounter.unmounted.count, 1, "the volume mounted after the delete must be unmounted")
+        proc.debugWaitUntilExit()
+        XCTAssertFalse(proc.isRunning)
+    }
+
+    func testQuitDuringStartStopsRcloneAndLeavesNothingMounted() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        let task = try await startGatedMount(f, r)
+        let proc = try XCTUnwrap(f.manager.mountAttempts[r.id]?.process)
+
+        f.manager.shutdownAll()
+        proc.debugWaitUntilExit()
+        XCTAssertFalse(proc.isRunning, "rclone must be stopped at quit even though NetFS is still running")
+        f.mounter.releaseMount()
+        try await task.value
+
+        XCTAssertEqual(f.manager.sessions[0].status, .idle)
+        XCTAssertNil(f.manager.sessions[0].rcloneProcess)
+        XCTAssertEqual(f.mounter.unmounted.count, 1)
+    }
+
+    func testCancelMountReturnsToIdle() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        let task = try await startGatedMount(f, r)
+
+        f.manager.cancelMount(remoteID: r.id)
+        f.mounter.releaseMount()
+        try await task.value
+
+        XCTAssertEqual(f.manager.sessions[0].status, .idle)
+        XCTAssertEqual(f.mounter.unmounted.count, 1)
+        XCTAssertFalse(f.manager.isMountInFlight(remoteID: r.id))
+        f.manager.cancelMount(remoteID: r.id)    // no attempt: no-op
+    }
+
+    func testRcloneExitBeforeMountCompletesFailsTheMount() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        let task = try await startGatedMount(f, r)
+        let proc = try XCTUnwrap(f.manager.mountAttempts[r.id]?.process)
+
+        proc.terminate()
+        proc.debugWaitUntilExit()
+        f.mounter.releaseMount()
+        let error = await thrownError { try await task.value }
+
+        XCTAssertNotNil(error)
+        guard case .failed(let reason) = f.manager.sessions[0].status else {
+            return XCTFail("expected failed status, got \(f.manager.sessions[0].status)")
+        }
+        XCTAssertTrue(reason.contains("exited before the mount completed"), reason)
+        XCTAssertNil(f.manager.sessions[0].rcloneProcess)
+        XCTAssertEqual(f.mounter.unmounted.count, 1, "the half-made mount must be removed")
     }
 
     // MARK: - Auto-mount
@@ -551,8 +924,10 @@ final class SessionManagerTests: DebugTestCase {
         for log in ["couldn't fetch token: invalid_grant", "invalid_grant\n" + hint] {
             let f = try makeFixture()
             let r = makeRemote(backend: s3Backend(), autoMount: true)
-            try f.manager.add(r) // Missing credentials fail the mount; the log supplies rclone's reason.
-            try log.write(to: f.manager.logURL(for: r.id), atomically: true, encoding: .utf8)
+            try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+            // rclone starts, writes its reason to the log and exits (a stale log from an earlier
+            // run is deliberately ignored, so the failure has to come from a real spawn).
+            try log.write(to: f.dir.appendingPathComponent("serve-fail.txt"), atomically: true, encoding: .utf8)
             let failed = expectation(description: "sign-in failure with recovery hint")
             let retried = expectation(description: "no second attempt")
             retried.isInverted = true
@@ -808,7 +1183,7 @@ extension SessionManagerTests {
         await client.delayNext()
         let refresh = Task { await f.manager.refreshUploadStatus(remoteID: remote.id) }
         try await waitForUploads { await client.waiting != nil }
-        try f.manager.delete(remote.id)
+        try await f.manager.delete(remote.id)
         await client.release()
         await refresh.value
         XCTAssertNil(f.manager.uploadStatus[remote.id])
@@ -994,7 +1369,7 @@ extension SessionManagerTests {
         try await f.manager.unmount(remoteID: remotes[0].id)
         XCTAssertEqual(tracker.snapshot.roots, [f.dir.appendingPathComponent("two").path])
         XCTAssertEqual(tracker.snapshot.items.count, 1)
-        try f.manager.delete(remotes[1].id)
+        try await f.manager.delete(remotes[1].id)
         XCTAssertTrue(tracker.snapshot.roots.isEmpty)
         XCTAssertTrue(tracker.snapshot.items.isEmpty)
     }

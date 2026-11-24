@@ -7,6 +7,8 @@ public class Mounter {
         case mountpointCreationFailed(String)
         case mountFailed(stderr: String, exitCode: Int32)
         case unmountFailed(stderr: String, exitCode: Int32)
+        /// The volume is in use (open files, a Finder window); a plain unmount was refused.
+        case busy(mountpoint: String)
         case netFSFailed(status: Int32)
 
         public var errorDescription: String? {
@@ -17,6 +19,8 @@ public class Mounter {
                 return "mount failed (exit \(code)): \(stderr.isEmpty ? "no stderr output" : stderr)"
             case .unmountFailed(let stderr, let code):
                 return "unmount failed (exit \(code)): \(stderr.isEmpty ? "no stderr output" : stderr)"
+            case .busy(let mp):
+                return "\(mp) is in use by an app or Finder, so it was not unmounted."
             case .netFSFailed(let status):
                 return "NetFS mount failed (status \(status))"
             }
@@ -117,12 +121,22 @@ public class Mounter {
         } catch {
             throw MountError.mountpointCreationFailed(error.localizedDescription)
         }
-        var candidate = base.appendingPathComponent(name).path
+        // The raw remote name may hold "/", "..", or a leading dash; only a sanitized single
+        // component is ever appended, and the result must stay directly under the base.
+        let name = RemoteName.pathComponent(from: name)
+        func inBase(_ component: String) throws -> String {
+            let url = base.appendingPathComponent(component)
+            guard url.deletingLastPathComponent().standardizedFileURL.path == base.standardizedFileURL.path else {
+                throw MountError.mountpointCreationFailed("the name \"\(name)\" is not allowed")
+            }
+            return url.path
+        }
+        var candidate = try inBase(name)
         var counter = 2
         while fm.fileExists(atPath: candidate) {
             let contents = (try? fm.contentsOfDirectory(atPath: candidate)) ?? ["?"]
             if contents.isEmpty && !isMountPoint(candidate) { return candidate }
-            candidate = base.appendingPathComponent("\(name)-\(counter)").path
+            candidate = try inBase("\(name)-\(counter)")
             counter += 1
         }
         do {
@@ -209,17 +223,21 @@ public class Mounter {
         return cleaned
     }
 
+    /// Stops RMount-owned `rclone serve` processes that no session owns (left by a run that died,
+    /// whether or not they ever got mounted) and unmounts the localhost WebDAV volumes they served,
+    /// even when the remote was renamed or deleted since. See `OrphanReaper` for the safety rules.
+    @discardableResult
+    public func reconcileOrphanedRclone() -> OrphanReaper.Report {
+        OrphanReaper(
+            listMounts: { self.currentLocalMounts() },
+            unmount: { try? self.forceUnmount(mountpoint: $0) }
+        ).reap()
+    }
+
     private static func output(of exe: String, _ args: [String]) -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: exe)
-        p.arguments = args
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do { try p.run() } catch { return "" }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(data: data, encoding: .utf8) ?? ""
+        guard let r = try? ProcessRunner.run(executable: URL(fileURLWithPath: exe), arguments: args, timeout: 15)
+        else { return "" }
+        return r.stdoutString
     }
 
     /// If `/Volumes/<volname>` is currently mounted from a `http://127.0.0.1:<port>/...`
@@ -242,16 +260,9 @@ public class Mounter {
     /// the port. Returns nil if the volume isn't mounted, or it's mounted from a
     /// non-localhost source (someone else's mount we shouldn't touch).
     private func staleLocalhostPort(forVolume volname: String) -> Int? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/sbin/mount")
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        p.waitUntilExit()
-        guard let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) else {
-            return nil
-        }
+        guard let r = try? ProcessRunner.run(executable: URL(fileURLWithPath: "/sbin/mount"), timeout: 15),
+              !r.timedOut else { return nil }
+        let text = r.stdoutString
         let suffix = " on /Volumes/\(volname) "
         for line in text.split(separator: "\n") {
             guard line.contains(suffix) else { continue }
@@ -270,28 +281,24 @@ public class Mounter {
     /// have other rclone processes running unrelated to RMount.
     private func killRcloneOnPort(_ port: Int) {
         let pattern = "rclone serve (webdav|nfs).*--addr 127.0.0.1:\(port)( |$)"
-        let pgrep = Process()
-        pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        pgrep.arguments = ["-f", pattern]
-        let out = Pipe()
-        pgrep.standardOutput = out
-        pgrep.standardError = Pipe()
-        do { try pgrep.run() } catch { return }
-        pgrep.waitUntilExit()
-        guard let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) else {
-            return
-        }
+        guard let r = try? ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/pgrep"), arguments: ["-f", pattern], timeout: 15)
+        else { return }
+        let text = r.stdoutString
         for line in text.split(separator: "\n") {
             guard let pid = Int32(line.trimmingCharacters(in: .whitespaces)) else { continue }
             kill(pid, SIGTERM)
         }
     }
 
-    /// Calls `diskutil unmount <mountpoint>`. Falls back to `unmount force` on failure.
+    /// Calls `diskutil unmount <mountpoint>`. A refusal because the volume is in use throws
+    /// `MountError.busy` so the caller can ask the user; it never forces on its own. With
+    /// `force` (quit, remote deletion, the user's "Force Unmount") it uses `unmount force`.
     ///
     /// Unmounting something that is already gone (ejected in Finder, rclone killed, mount
     /// cleaned up by another run) is a success, not an error.
-    public func unmount(mountpoint: String) throws {
+    public func unmount(mountpoint: String, force: Bool = false) throws {
+        if force { return try forceUnmount(mountpoint: mountpoint) }
         guard isMounted(mountpoint: mountpoint) else { return }
         do {
             try run(
@@ -299,13 +306,16 @@ public class Mounter {
                 args: ["unmount", mountpoint],
                 failure: MountError.unmountFailed
             )
-        } catch {
-            try run(
-                "/usr/sbin/diskutil",
-                args: ["unmount", "force", mountpoint],
-                failure: MountError.unmountFailed
-            )
+        } catch MountError.unmountFailed(let stderr, let code) {
+            if Self.isBusyFailure(stderr) { throw MountError.busy(mountpoint: mountpoint) }
+            throw MountError.unmountFailed(stderr: stderr, exitCode: code)
         }
+    }
+
+    /// True when diskutil's message says the volume could not be unmounted because it is in use.
+    static func isBusyFailure(_ stderr: String) -> Bool {
+        let s = stderr.lowercased()
+        return s.contains("busy") || s.contains("dissented") || s.contains("in use")
     }
 
     /// `diskutil unmount force`, for mounts whose server is gone. No-op if not mounted.
@@ -316,33 +326,39 @@ public class Mounter {
 
     /// True when `mountpoint` appears as a mount target in `/sbin/mount` output.
     public func isMounted(mountpoint: String) -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/sbin/mount")
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do { try p.run() } catch { return true }   // can't tell: let diskutil decide
-        p.waitUntilExit()
-        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        // Can't tell (launch failed or hung): let diskutil decide.
+        guard let r = try? ProcessRunner.run(executable: URL(fileURLWithPath: "/sbin/mount"), timeout: 15),
+              !r.timedOut else { return true }
+        let text = r.stdoutString
         let resolved = URL(fileURLWithPath: mountpoint).resolvingSymlinksInPath().path
         return text.split(separator: "\n").contains { line in
             line.contains(" on \(mountpoint) (") || line.contains(" on \(resolved) (")
         }
     }
 
+    /// Longest a `diskutil`/`umount` run may take before it is killed (a hung one would
+    /// otherwise block its caller forever).
+    var commandDeadline: TimeInterval = 30
+
+    /// Waits for `p` by polling `isRunning` (never `waitUntilExit` after a kill, which can
+    /// miss its wakeup) and SIGKILLs it past the deadline.
+    static func waitWithDeadline(_ p: Process, seconds: TimeInterval) {
+        let end = Date().addingTimeInterval(seconds)
+        while p.isRunning && Date() < end { Thread.sleep(forTimeInterval: 0.02) }
+        if p.isRunning {
+            p.terminate()
+            let grace = Date().addingTimeInterval(1)
+            while p.isRunning && Date() < grace { Thread.sleep(forTimeInterval: 0.02) }
+            if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+            let after = Date().addingTimeInterval(1)
+            while p.isRunning && Date() < after { Thread.sleep(forTimeInterval: 0.02) }
+        }
+    }
+
     private func run(_ executable: String, args: [String], failure: (String, Int32) -> MountError) throws {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: executable)
-        p.arguments = args
-        let errPipe = Pipe()
-        p.standardError = errPipe
-        p.standardOutput = Pipe()
-        try p.run()
-        p.waitUntilExit()
-        if p.terminationStatus != 0 {
-            let data = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderr = String(data: data, encoding: .utf8) ?? ""
-            throw failure(stderr, p.terminationStatus)
+        let r = try ProcessRunner.run(executable: URL(fileURLWithPath: executable), arguments: args, timeout: commandDeadline)
+        if r.status != 0 {
+            throw failure(r.stderrString, r.status)
         }
     }
 }

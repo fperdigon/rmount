@@ -17,11 +17,20 @@ public final class SessionManager: ObservableObject {
     private var finderBadgesPreferenceCancellable: AnyCancellable?
 
     private let store: RemoteStore
-    private let keychain: KeychainService
+    private let keychain: SecretStore
     private let mounter: Mounter
     private let logsDir: URL
+    /// Parent of the per-remote rclone VFS cache directories (`<cacheRoot>/<remote UUID>`).
+    private let cacheRoot: URL
+    /// rclone's default shared cache, where pre-migration uploads may still wait.
+    private let legacyCacheRoot: URL
+    /// Remotes mounted on the legacy cache; each moves to its own dir after a mount with no pending uploads.
+    private var legacyCacheMounts: Set<UUID> = []
     private let rcloneBinary: URL
     private let hostKeyVerifier: HostKeyVerifier?
+    /// Tests only: lets an SFTP remote run without a host-key verifier. In the app a missing
+    /// verifier is an error, never "no host-key checking".
+    var allowMissingHostKeyVerifier = false
 
     /// How long `mount` waits for rclone to start listening. Overridable for tests.
     public var portWaitTimeout: TimeInterval = 30
@@ -31,9 +40,11 @@ public final class SessionManager: ObservableObject {
 
     public init(
         store: RemoteStore,
-        keychain: KeychainService,
+        keychain: SecretStore,
         mounter: Mounter,
         logsDir: URL,
+        cacheRoot: URL? = nil,
+        legacyCacheRoot: URL? = nil,
         rcloneBinary: URL,
         hostKeyVerifier: HostKeyVerifier? = nil,
         preferences: UserPreferences = UserPreferences(),
@@ -47,6 +58,8 @@ public final class SessionManager: ObservableObject {
         self.keychain = keychain
         self.mounter = mounter
         self.logsDir = logsDir
+        self.cacheRoot = cacheRoot ?? logsDir.deletingLastPathComponent().appendingPathComponent("cache", isDirectory: true)
+        self.legacyCacheRoot = legacyCacheRoot ?? LegacyVFSCache.defaultRoot
         self.rcloneBinary = rcloneBinary
         self.hostKeyVerifier = hostKeyVerifier
         self.controlClient = controlClient
@@ -115,7 +128,10 @@ public final class SessionManager: ObservableObject {
         uploadGenerations[remoteID] = generation
         uploadMonitors[remoteID] = UploadMonitor(client: client) { [weak self] status in
             guard let self, self.uploadGenerations[remoteID] == generation else { return }
-            self.uploadStatus[remoteID] = status
+            if self.uploadStatus[remoteID] != status { self.uploadStatus[remoteID] = status }
+            if !status.hasPending, !status.isStale, self.legacyCacheMounts.contains(remoteID) {
+                self.markCacheMigrated(remoteID)
+            }
             if let session = self.sessions.first(where: { $0.id == remoteID }) {
                 self.finderBadgeTracker.sync(remoteID: remoteID, remoteName: session.remote.name,
                                             mountpoint: session.mountpoint, status: status)
@@ -144,6 +160,10 @@ public final class SessionManager: ObservableObject {
         finderProgressPublisher.clear(remoteID: remoteID)
         finderBadgeTracker.clear(remoteID: remoteID)
     }
+
+    /// Notice about `remotes.json` entries this version could not read (kept untouched on disk);
+    /// nil when everything loaded. Non-fatal: the app shows it and carries on.
+    public var storeNotice: String? { store.skippedNotice }
 
     public func reload() throws {
         let remotes = try store.load()
@@ -180,6 +200,7 @@ public final class SessionManager: ObservableObject {
             try? await Self.offMain {
                 for v in volnames { mounter.reconcileStaleMount(volumeName: v) }
                 mounter.reconcileLeftoverNFSMounts()
+                mounter.reconcileOrphanedRclone()
             }
             guard let self else { return }
             for session in self.sessions where session.remote.autoMount {
@@ -245,6 +266,7 @@ public final class SessionManager: ObservableObject {
     }
 
     public func add(_ remote: Remote, sftpSecrets: SFTPSecrets? = nil, s3Secrets: S3Secrets? = nil, ftpSecrets: FTPSecrets? = nil, optionSecrets: [String: String]? = nil) throws {
+        try RemoteName.validate(remote.name)
         if let s = sftpSecrets {
             if let pwd = s.password { try keychain.set(remoteID: remote.id, kind: .password, value: pwd) }
             if let pp = s.keyPassphrase { try keychain.set(remoteID: remote.id, kind: .keyPassphrase, value: pp) }
@@ -272,6 +294,7 @@ public final class SessionManager: ObservableObject {
     /// non-nil and non-empty values overwrite the keychain. The session reference
     /// is preserved so an in-flight `.starting` status survives the update.
     public func update(_ remote: Remote, sftpSecrets: SFTPSecrets? = nil, s3Secrets: S3Secrets? = nil, ftpSecrets: FTPSecrets? = nil, optionSecrets: [String: String]? = nil) throws {
+        try RemoteName.validate(remote.name)
         if let s = sftpSecrets {
             if let pwd = s.password, !pwd.isEmpty { try keychain.set(remoteID: remote.id, kind: .password, value: pwd) }
             if let pp = s.keyPassphrase, !pp.isEmpty { try keychain.set(remoteID: remote.id, kind: .keyPassphrase, value: pp) }
@@ -303,11 +326,14 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    public func delete(_ remoteID: UUID) throws {
+    /// Unmounts (off the main actor, so the menu bar stays responsive), then removes the remote.
+    public func delete(_ remoteID: UUID) async throws {
         retryTasks[remoteID]?.cancel()
         retryTasks[remoteID] = nil
+        let hadPendingUploads = uploadStatus[remoteID]?.hasPending ?? false
+        if let attempt = mountAttempts[remoteID] { abort(attempt, unmountBlocking: true) }
         if let session = sessions.first(where: { $0.id == remoteID }), case .mounted = session.status {
-            try? unmountBlocking(remoteID: remoteID)
+            try? await unmount(remoteID: remoteID, force: true)
         }
         try? keychain.delete(remoteID: remoteID, kind: .password)
         try? keychain.delete(remoteID: remoteID, kind: .keyPassphrase)
@@ -322,7 +348,39 @@ public final class SessionManager: ObservableObject {
         var all = try store.load()
         all.removeAll { $0.id == remoteID }
         try store.save(all)
+        // Keep the cache when uploads were still pending: it holds the only copy of those files.
+        if !hadPendingUploads { try? FileManager.default.removeItem(at: cacheDir(for: remoteID)) }
         try reload()
+    }
+
+    /// `--cache-dir` for this mount. A remote saved before per-remote caches keeps rclone's old shared
+    /// cache (no flag) while that cache may still hold its entries, so no pending upload is stranded;
+    /// otherwise it switches to its own dir at once. The old cache is never deleted.
+    private func cacheArgs(for remote: Remote, remotePath: String) -> [String] {
+        if !remote.cacheMigrated {
+            if LegacyVFSCache.hasEntries(root: legacyCacheRoot, remotePath: remotePath) {
+                legacyCacheMounts.insert(remote.id)
+                return []
+            }
+            markCacheMigrated(remote.id)
+        }
+        return MountOptions.cacheDirArgs(cacheDir(for: remote.id))
+    }
+
+    /// Persists that the remote uses its own cache dir (from the next mount on).
+    func markCacheMigrated(_ remoteID: UUID) {
+        legacyCacheMounts.remove(remoteID)
+        guard var all = try? store.load(), let i = all.firstIndex(where: { $0.id == remoteID }),
+              !all[i].cacheMigrated else { return }
+        all[i].cacheMigrated = true
+        guard (try? store.save(all)) != nil else { return }
+        sessions.first(where: { $0.id == remoteID })?.remote.cacheMigrated = true
+    }
+
+    /// rclone's own VFS cache directory for one remote, never shared with another remote or
+    /// with other rclone processes (rclone's default is one `~/Library/Caches/rclone` for all).
+    func cacheDir(for remoteID: UUID) -> URL {
+        cacheRoot.appendingPathComponent(remoteID.uuidString, isDirectory: true)
     }
 
     /// Key file path saved for a `.keyFile` SFTP remote (a path, not a secret), so edit
@@ -358,6 +416,7 @@ public final class SessionManager: ObservableObject {
     /// Turns a remote and its secrets (from `draft` first, then the Keychain) into rclone
     /// config text, environment overrides and the path to serve. Shared by mount and
     /// "Test connection" so both exercise exactly the same inputs.
+    /// "Test connection" so both exercise exactly the same inputs.
     private func prepareRclone(for remote: Remote, draft: DraftSecrets?) async throws -> PreparedRclone {
         let rcloneBinary = self.rcloneBinary
         var ephemeralKeyURL: URL? = nil
@@ -365,25 +424,27 @@ public final class SessionManager: ObservableObject {
         var bundle = BackendSecrets()
         let remotePath: String
 
-        func stored(_ kind: SecretKind, draft value: String? = nil) throws -> String? {
+        // Keychain reads can block (unlock prompt), so they run off the main actor.
+        let keychain = self.keychain, remoteID = remote.id
+        func stored(_ kind: SecretKind, draft value: String? = nil) async throws -> String? {
             if let value, !value.isEmpty { return value }
-            return try keychain.get(remoteID: remote.id, kind: kind)
+            return try await Self.offMain { try keychain.get(remoteID: remoteID, kind: kind) }
         }
 
         do {
             switch remote.backend {
             case .sftp(let sftp):
                 let d = draft?.sftp
-                let password = try stored(.password, draft: d?.password)
+                let password = try await stored(.password, draft: d?.password)
                 var resolvedKeyPath: String? = nil
                 switch sftp.authKind {
                 case .password: break
                 case .keyFile:
-                    resolvedKeyPath = try stored(.privateKey, draft: d?.privateKeyPath)
+                    resolvedKeyPath = try await stored(.privateKey, draft: d?.privateKeyPath)
                 case .generatedKey:
-                    if let pem = try stored(.privateKey, draft: d?.privateKeyPath) {
+                    if let pem = try await stored(.privateKey, draft: d?.privateKeyPath) {
                         let url = FileManager.default.temporaryDirectory
-                            .appendingPathComponent("rmount-key-\(remote.id.uuidString)")
+                            .appendingPathComponent(TempNaming.keyName(remoteID: remote.id))
                         try pem.write(to: url, atomically: true, encoding: .utf8)
                         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
                         ephemeralKeyURL = url
@@ -393,7 +454,7 @@ public final class SessionManager: ObservableObject {
                 bundle.sftp = SFTPSecrets(
                     password: password,
                     privateKeyPath: resolvedKeyPath,
-                    keyPassphrase: try stored(.keyPassphrase, draft: d?.keyPassphrase)
+                    keyPassphrase: try await stored(.keyPassphrase, draft: d?.keyPassphrase)
                 )
                 if sftp.authKind == .keyFile, let pp = bundle.sftp?.keyPassphrase, !pp.isEmpty {
                     // Without this, passphrase-protected keys fail with
@@ -409,12 +470,15 @@ public final class SessionManager: ObservableObject {
                     let host = sftp.host, port = sftp.port
                     let inspection = try await Self.offMain { try verifier.inspect(host: host, port: port) }
                     try verifier.resolve(inspection)     // dialog + known_hosts on the main actor
+                } else if !allowMissingHostKeyVerifier {
+                    // Never run SFTP without known_hosts checking.
+                    throw HostKeyError.verifierUnavailable
                 }
                 remotePath = sftp.remotePath
 
             case .s3(let s3):
-                guard let access = try stored(.s3AccessKeyID, draft: draft?.s3?.accessKeyID),
-                      let secret = try stored(.s3SecretAccessKey, draft: draft?.s3?.secretAccessKey) else {
+                guard let access = try await stored(.s3AccessKeyID, draft: draft?.s3?.accessKeyID),
+                      let secret = try await stored(.s3SecretAccessKey, draft: draft?.s3?.secretAccessKey) else {
                     throw RcloneConfigError.missingS3Credentials
                 }
                 bundle.s3 = S3Secrets(accessKeyID: access, secretAccessKey: secret)
@@ -422,7 +486,7 @@ public final class SessionManager: ObservableObject {
                 remotePath = s3.prefix.isEmpty ? s3.bucket : "\(s3.bucket)/\(s3.prefix)"
 
             case .ftp(let ftp):
-                guard let password = try stored(.password, draft: draft?.ftp?.password) else {
+                guard let password = try await stored(.password, draft: draft?.ftp?.password) else {
                     throw RcloneConfigError.missingFTPPassword
                 }
                 bundle.ftp = FTPSecrets(password: password)
@@ -432,7 +496,7 @@ public final class SessionManager: ObservableObject {
 
             case .rclone(let cfg):
                 for opt in cfg.secretOptions {
-                    guard let value = try stored(.option(opt.name), draft: draft?.options[opt.name]), !value.isEmpty else {
+                    guard let value = try await stored(.option(opt.name), draft: draft?.options[opt.name]), !value.isEmpty else {
                         if opt.required { throw RcloneConfigError.missingSecret(opt.name) }
                         continue
                     }
@@ -525,7 +589,7 @@ public final class SessionManager: ObservableObject {
                     }
                 }
                 imported.remote.name = RcloneConfImporter.uniqueName(
-                    section.name, existing: sessions.map { $0.remote.name })
+                    RemoteName.pathComponent(from: section.name), existing: sessions.map { $0.remote.name })
                 do {
                     try add(imported.remote, sftpSecrets: imported.sftp, s3Secrets: imported.s3,
                             ftpSecrets: imported.ftp, optionSecrets: imported.options.isEmpty ? nil : imported.options)
@@ -538,8 +602,45 @@ public final class SessionManager: ObservableObject {
         return summary
     }
 
+    /// What one mount attempt has created so far, so a cancel (delete, quit, user) can undo it
+    /// even while an off-main NetFS / `mount_nfs` call is still running.
+    @MainActor
+    final class MountAttempt {
+        var task: Task<Void, Error>?
+        var process: Process?
+        var configURL: URL?
+        var ephemeralKeyURL: URL?
+        var mountpoint: String?
+        var cancelled = false
+    }
+
+    private(set) var mountAttempts: [UUID: MountAttempt] = [:]
+
+    /// True while a mount for this remote is starting (cancellable).
+    public func isMountInFlight(remoteID: UUID) -> Bool { mountAttempts[remoteID] != nil }
+
+    /// Cancels a mount that is still starting: stops the rclone it spawned and unmounts
+    /// anything it already mounted. The session returns to idle.
+    public func cancelMount(remoteID: UUID) {
+        guard let attempt = mountAttempts[remoteID] else { return }
+        abort(attempt, unmountBlocking: false)
+    }
+
+    /// Marks the attempt cancelled and tears down what exists now, synchronously. The
+    /// attempt's own task re-checks after each await and finishes any remaining cleanup.
+    private func abort(_ attempt: MountAttempt, unmountBlocking blocking: Bool) {
+        attempt.cancelled = true
+        attempt.task?.cancel()
+        if let proc = attempt.process, proc.isRunning { proc.terminate() }
+        if blocking, let mp = attempt.mountpoint {
+            try? mounter.unmount(mountpoint: mp)
+            attempt.mountpoint = nil
+        }
+    }
+
     /// Mounts a remote. Everything that blocks (rclone start-up, host-key scan, NetFS,
-    /// mount_nfs) runs off the main thread; only state changes and dialogs use it.
+    /// mount_nfs) runs off the main thread; only state changes and dialogs use it. The work
+    /// runs as a task tracked per remote so `cancelMount`, `delete` and `shutdownAll` can stop it.
     public func mount(remoteID: UUID) async throws {
         guard let session = sessions.first(where: { $0.id == remoteID }) else { return }
         switch session.status {
@@ -547,53 +648,127 @@ public final class SessionManager: ObservableObject {
         default: break
         }
         session.transition(to: .starting)
+        let attempt = MountAttempt()
+        mountAttempts[remoteID] = attempt
+        // Unstructured on purpose: cancelling the caller (e.g. a superseded retry task) must
+        // not abort a mount that is already in flight.
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { if self.mountAttempts[remoteID] === attempt { self.mountAttempts[remoteID] = nil } }
+            try await self.performMount(session: session, attempt: attempt)
+        }
+        attempt.task = task
+        try await task.value
+    }
+
+    /// Still wanted: not cancelled, and the session is still in the list.
+    private func isWanted(_ session: RemoteSession, _ attempt: MountAttempt) -> Bool {
+        !attempt.cancelled && !Task.isCancelled && sessions.contains(where: { $0 === session })
+    }
+
+    private func performMount(session: RemoteSession, attempt: MountAttempt) async throws {
+        let remoteID = session.id
         let mounter = self.mounter
         let rcloneBinary = self.rcloneBinary
 
         let remote = session.remote
         let logFile = logsDir.appendingPathComponent("\(remote.id.uuidString).log")
-        var ephemeralKeyURL: URL? = nil
-        var spawnedProcess: Process? = nil
-        var spawnedConfig: URL? = nil
+
+        /// Undoes whatever the attempt created. Safe to call twice.
+        func rollback() async {
+            if let proc = attempt.process, proc.isRunning { proc.terminate() }
+            if let url = attempt.ephemeralKeyURL { try? FileManager.default.removeItem(at: url) }
+            if let cfg = attempt.configURL { try? FileManager.default.removeItem(at: cfg.deletingLastPathComponent()) }
+            attempt.ephemeralKeyURL = nil
+            attempt.configURL = nil
+            if let mp = attempt.mountpoint {
+                attempt.mountpoint = nil
+                _ = try? await Self.offMain { try mounter.unmount(mountpoint: mp) }
+            }
+        }
+        /// Cancelled: roll back and leave the session idle (or gone) without an error.
+        func finishCancelled() async {
+            stopUploadMonitor(remoteID: remoteID)
+            await rollback()
+            if sessions.contains(where: { $0 === session }), case .starting = session.status {
+                session.transition(to: .idle)
+            }
+        }
 
         do {
             let prepared = try await prepareRclone(for: remote, draft: nil)
-            ephemeralKeyURL = prepared.ephemeralKeyURL
+            attempt.ephemeralKeyURL = prepared.ephemeralKeyURL
+            guard isWanted(session, attempt) else { return await finishCancelled() }
             let configText = prepared.configText
             let envOverrides = prepared.envOverrides
             let remotePath = prepared.remotePath
             let logURL = logsDir.appendingPathComponent("\(remote.id.uuidString).log")
             let tuning = remote.effectiveTuning
             let extraArgs = MountOptions.serveArgs(readOnly: remote.readOnly, bandwidthLimit: remote.bandwidthLimit)
+                + cacheArgs(for: remote, remotePath: remotePath)
             let runner = RcloneProcess(binary: rcloneBinary, logFile: logURL)
             let volname = mounter.volumeName(from: remote.name)
-            let spawned: RcloneProcess.Spawned
-            switch remote.mountProtocol {
-            case .webdav:
-                spawned = try runner.spawnWebDAVServe(
-                    remoteName: RcloneConfigBuilder.sectionName,
-                    remotePath: remotePath,
-                    configText: configText,
-                    baseurl: "/\(volname)",
-                    liveUpdates: remote.liveUpdates,
-                    tuning: tuning,
-                    envOverrides: envOverrides,
-                    extraArgs: extraArgs
-                )
-            case .nfs:
-                spawned = try runner.spawnNFSServe(
-                    remoteName: RcloneConfigBuilder.sectionName,
-                    remotePath: remotePath,
-                    configText: configText,
-                    liveUpdates: remote.liveUpdates,
-                    tuning: tuning,
-                    envOverrides: envOverrides,
-                    extraArgs: extraArgs
-                )
+            func spawnOnce() throws -> RcloneProcess.Spawned {
+                switch remote.mountProtocol {
+                case .webdav:
+                    return try runner.spawnWebDAVServe(
+                        remoteName: RcloneConfigBuilder.sectionName,
+                        remotePath: remotePath,
+                        configText: configText,
+                        baseurl: "/\(volname)",
+                        liveUpdates: remote.liveUpdates,
+                        tuning: tuning,
+                        envOverrides: envOverrides,
+                        extraArgs: extraArgs
+                    )
+                case .nfs:
+                    return try runner.spawnNFSServe(
+                        remoteName: RcloneConfigBuilder.sectionName,
+                        remotePath: remotePath,
+                        configText: configText,
+                        liveUpdates: remote.liveUpdates,
+                        tuning: tuning,
+                        envOverrides: envOverrides,
+                        extraArgs: extraArgs
+                    )
+                }
             }
-            spawnedProcess = spawned.process
-            spawnedConfig = spawned.configURL
-            try await waitForPort(spawned.port, process: spawned.process, timeout: portWaitTimeout)
+            // The free port is picked before rclone binds it, so another process can win the
+            // race. rclone then exits with "address already in use": retry with fresh ports.
+            /// Records the process for rollback and watches it from the moment it exists, so an exit
+            /// at any later point is seen. While the session is still starting handleRcloneExit
+            /// ignores it and the isRunning check below fails the mount; once mounted it drops the mount.
+            func register(_ sp: RcloneProcess.Spawned) {
+                attempt.process = sp.process
+                attempt.configURL = sp.configURL
+                let watching = sp.process
+                watching.terminationHandler = { [weak self, weak session] _ in
+                    // Bind strong locals first: older compilers reject using the captured weak
+                    // vars inside the concurrently-executing Task.
+                    guard let manager = self, let exited = session else { return }
+                    Task { @MainActor in
+                        await manager.handleRcloneExit(session: exited, process: watching)
+                    }
+                }
+            }
+            var spawned = try spawnOnce()
+            var spawnTry = 1
+            while true {
+                register(spawned)
+                guard isWanted(session, attempt) else { return await finishCancelled() }
+                do {
+                    try await waitForPort(spawned.port, process: spawned.process, timeout: portWaitTimeout)
+                    break
+                } catch {
+                    guard spawnTry < Self.maxSpawnAttempts, !spawned.process.isRunning,
+                          Self.isBindFailure(logFile: logURL) else { throw error }
+                    try? FileManager.default.removeItem(at: spawned.configURL.deletingLastPathComponent())
+                    spawnTry += 1
+                    spawned = try spawnOnce()
+                }
+            }
+            let watched = spawned.process
+            guard isWanted(session, attempt) else { return await finishCancelled() }
 
             let mountpoint: String
             switch remote.mountProtocol {
@@ -610,37 +785,37 @@ public final class SessionManager: ObservableObject {
                     return mp
                 }
             }
+            attempt.mountpoint = mountpoint
+            guard isWanted(session, attempt) else { return await finishCancelled() }
+            guard watched.isRunning else {
+                throw NSError(domain: "rmount", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "rclone exited before the mount completed (exit \(watched.terminationStatus))"])
+            }
 
             session.rcloneProcess = spawned.process
-            let watched = spawned.process
-            watched.terminationHandler = { [weak self, weak session] _ in
-                // Bind strong locals first: older compilers reject using the captured weak
-                // vars inside the concurrently-executing Task.
-                guard let manager = self, let exited = session else { return }
-                Task { @MainActor in
-                    await manager.handleRcloneExit(session: exited, process: watched)
-                }
-            }
             session.mountpoint = mountpoint
-            session.ephemeralKeyURL = ephemeralKeyURL
+            session.ephemeralKeyURL = attempt.ephemeralKeyURL
             session.rcloneConfigURL = spawned.configURL
             session.transition(to: .mounted(at: mountpoint))
             startUploadMonitor(remoteID: remoteID, client: controlClient(spawned))
         } catch {
+            if attempt.cancelled || !sessions.contains(where: { $0 === session }) {
+                return await finishCancelled()
+            }
             stopUploadMonitor(remoteID: remoteID)
-            if let url = ephemeralKeyURL { try? FileManager.default.removeItem(at: url) }
-            if let proc = spawnedProcess, proc.isRunning { proc.terminate() }
-            if let cfg = spawnedConfig { try? FileManager.default.removeItem(at: cfg.deletingLastPathComponent()) }
-            var reason = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
-            // rclone's own explanation (bad key, auth failure, ...) only goes to its log.
-            if let tail = Self.logTail(of: logFile) { reason += "\n" + tail }
+            // rclone's own explanation (bad key, auth failure, ...) only goes to its log, and
+            // only if rclone was started in this attempt (else the log is the previous run's).
+            let reason = Self.failureReason(error, logFile: attempt.process != nil ? logFile : nil)
+            await rollback()
             session.transition(to: .failed(reason: reason))
             throw error
         }
     }
 
-    /// Unmounts a remote without blocking the main thread.
-    public func unmount(remoteID: UUID) async throws {
+    /// Unmounts a remote without blocking the main thread. Throws `Mounter.MountError.busy`
+    /// (session left mounted) when the volume is in use; call again with `force: true` once
+    /// the user agrees.
+    public func unmount(remoteID: UUID, force: Bool = false) async throws {
         guard let session = sessions.first(where: { $0.id == remoteID }) else { return }
         switch session.status {
         case .starting, .stopping: return
@@ -652,7 +827,7 @@ public final class SessionManager: ObservableObject {
         session.transition(to: .stopping)
         if let mp = session.mountpoint {
             let mounter = self.mounter
-            do { try await Self.offMain { try mounter.unmount(mountpoint: mp) } }
+            do { try await Self.offMain { try mounter.unmount(mountpoint: mp, force: force) } }
             catch {
                 session.transition(to: previous)    // still mounted (e.g. busy)
                 throw error
@@ -668,7 +843,7 @@ public final class SessionManager: ObservableObject {
         retryTasks[remoteID]?.cancel()
         retryTasks[remoteID] = nil
         if let mp = session.mountpoint {
-            try mounter.unmount(mountpoint: mp)
+            try mounter.unmount(mountpoint: mp, force: true)
         }
         finishUnmount(session)
     }
@@ -724,8 +899,11 @@ public final class SessionManager: ObservableObject {
             _ = try? await Self.offMain { try mounter.forceUnmount(mountpoint: mp) }
         }
         if let url = session.ephemeralKeyURL { try? FileManager.default.removeItem(at: url) }
+        // rclone is gone, so its config is final: keep a refreshed token, then delete the temp dir.
+        persistRefreshedSecrets(session)
         session.mountpoint = nil
         session.ephemeralKeyURL = nil
+        session.rcloneConfigURL = nil
         var reason = "rclone stopped unexpectedly (exit \(status)); the mount was removed"
         if let tail = Self.logTail(of: logsDir.appendingPathComponent("\(session.id.uuidString).log")) {
             reason += "\n" + tail
@@ -734,23 +912,108 @@ public final class SessionManager: ObservableObject {
         if session.remote.autoMount { scheduleMount(remoteID: session.id, attempt: 0) }
     }
 
-    public func shutdownAll() {
+    /// Plain argv of all running processes (no environment, so no secrets), or "" on failure.
+    public nonisolated static func liveProcessCommandLines() -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/ps")
+        p.arguments = ["-axww", "-o", "command="]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return "" }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()   // ends when ps exits
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Removes `rmount-rclone-*` dirs and `rmount-key-*` files left in the temp dir by a crash or
+    /// force-quit (they hold a plaintext config or a decrypted key). Call once at launch.
+    /// Only items carrying this app's tag (bundle id) are considered, so another flavor or
+    /// instance is never touched. Legacy untagged items (older builds) are removed only when
+    /// older than `legacyMinAge` and absent from the process argv. Items used by a session
+    /// here, or modified in the last `minAge` seconds, are always kept.
+    @discardableResult
+    public func sweepStaleTempItems(
+        in dir: URL = FileManager.default.temporaryDirectory,
+        tag: String = TempNaming.tag,
+        minAge: TimeInterval = 60,
+        legacyMinAge: TimeInterval = 24 * 3600,
+        now: Date = Date(),
+        processLister: () -> String = SessionManager.liveProcessCommandLines
+    ) -> Int {
+        var keep = Set<String>()
+        for s in sessions {
+            if let c = s.rcloneConfigURL { keep.insert(c.deletingLastPathComponent().lastPathComponent) }
+            if let k = s.ephemeralKeyURL { keep.insert(k.lastPathComponent) }
+        }
+        let fm = FileManager.default
+        let own = [TempNaming.rclonePrefix + tag + "-", TempNaming.keyPrefix + tag + "-"]
+        let legacy = [TempNaming.rclonePrefix, TempNaming.keyPrefix]
+        var live: String?
+        var removed = 0
+        for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where !keep.contains(name) {
+            let isOwn = own.contains { name.hasPrefix($0) }
+            let isLegacy = !isOwn && legacy.contains { prefix in
+                name.hasPrefix(prefix) && UUID(uuidString: String(name.dropFirst(prefix.count))) != nil
+            }
+            guard isOwn || isLegacy else { continue }
+            let url = dir.appendingPathComponent(name)
+            let age = ((try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date)
+                .map { now.timeIntervalSince($0) } ?? .infinity
+            if age < (isLegacy ? max(minAge, legacyMinAge) : minAge) { continue }
+            if isLegacy {
+                if live == nil { live = processLister() }
+                if live!.contains(name) { continue }
+            }
+            if (try? fm.removeItem(at: url)) != nil { removed += 1 }
+        }
+        return removed
+    }
+
+    /// Unmounts every mounted remote at app quit. The unmounts run in parallel and the whole
+    /// call is bounded by `deadline` seconds, so one hung `diskutil` cannot stall quitting.
+    public func shutdownAll(deadline: TimeInterval = 8) {
         for (_, task) in retryTasks { task.cancel() }
         retryTasks.removeAll()
+        for attempt in Array(mountAttempts.values) { abort(attempt, unmountBlocking: true) }
         // Invalidate every callback before unmounting: even a busy volume must not
         // republish Finder progress while the app is quitting.
         for remoteID in Array(uploadMonitors.keys) { stopUploadMonitor(remoteID: remoteID) }
         finderProgressPublisher.clearAll()
         finderBadgeTracker.clearAll()
-        for session in sessions {
-            if case .mounted = session.status {
-                try? unmountBlocking(remoteID: session.id)
+        let targets = sessions.compactMap { s -> (RemoteSession, String)? in
+            if case .mounted = s.status, let mp = s.mountpoint { return (s, mp) }
+            return nil
+        }
+        let mounter = self.mounter
+        let group = DispatchGroup()
+        let failed = NSLock()
+        var failedIDs = Set<UUID>()
+        for (session, mp) in targets {
+            let id = session.id
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                do { try mounter.unmount(mountpoint: mp, force: true) }
+                catch { failed.lock(); failedIDs.insert(id); failed.unlock() }
+                group.leave()
             }
+        }
+        _ = group.wait(timeout: .now() + deadline)
+        failed.lock(); let failedNow = failedIDs; failed.unlock()
+        // A failed (busy) unmount keeps its session as it was; a hung one is abandoned.
+        for (session, _) in targets where !failedNow.contains(session.id) {
+            finishUnmount(session)
         }
     }
 
     public func logURL(for remoteID: UUID) -> URL {
         logsDir.appendingPathComponent("\(remoteID.uuidString).log")
+    }
+
+    /// The error text, with the log tail appended when `logFile` is given (rclone ran this attempt).
+    static func failureReason(_ error: Error, logFile: URL?) -> String {
+        var reason = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+        if let logFile, let tail = logTail(of: logFile) { reason += "\n" + tail }
+        return reason
     }
 
     /// Last `lines` non-empty lines of an rclone log, or nil if it is missing/empty.
@@ -765,7 +1028,12 @@ public final class SessionManager: ObservableObject {
     private func waitForPort(_ port: Int, process: Process, timeout: TimeInterval) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if Self.canConnect(port: port) { return }
+            if Self.canConnect(port: port) {
+                // Something listens; make sure it is our rclone and not a process that took the port first.
+                let pid = process.processIdentifier
+                let owners = try await Self.offMain { Self.listeningPIDs(port: port) }
+                if owners == nil || owners!.contains(pid) { return }
+            }
             if !process.isRunning {
                 throw NSError(domain: "rmount", code: 2, userInfo: [
                     NSLocalizedDescriptionKey: "rclone exited before it started listening (exit \(process.terminationStatus))"])
@@ -774,6 +1042,30 @@ public final class SessionManager: ObservableObject {
         }
         throw NSError(domain: "rmount", code: 1, userInfo: [
             NSLocalizedDescriptionKey: "rclone serve did not open port \(port) within \(Int(timeout))s"])
+    }
+
+    nonisolated static let maxSpawnAttempts = 3
+
+    /// True when rclone's log says it could not bind its port.
+    nonisolated static func isBindFailure(logFile: URL) -> Bool {
+        guard let text = try? String(contentsOf: logFile, encoding: .utf8) else { return false }
+        return text.lowercased().contains("address already in use")
+    }
+
+    /// Pids listening on `127.0.0.1:port` (via `lsof`), or nil when that cannot be determined.
+    nonisolated static func listeningPIDs(port: Int) -> Set<Int32>? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        p.arguments = ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-t"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        // lsof exits 1 with no output when nothing matches; any other failure is "unknown".
+        guard p.terminationStatus == 0 || p.terminationStatus == 1 else { return nil }
+        return Set(String(decoding: data, as: UTF8.self).split(separator: "\n").compactMap { Int32($0) })
     }
 
     /// One non-blocking-in-practice TCP connect to 127.0.0.1 (refused or accepted at once).

@@ -54,6 +54,7 @@ enum IntegrationHarness {
             logsDir: dir.appendingPathComponent("logs"),
             rcloneBinary: rclone, finderBadgeTracker: FinderBadgeTracker(writer: NoopFinderBadgeStatusWriter())
         )
+        manager.allowMissingHostKeyVerifier = true
         let remote = Remote(id: UUID(), name: "rmount-it-\(label)-\(Int.random(in: 1000...9999))",
                             backend: backend, mountProtocol: proto, autoMount: false, readOnly: readOnly)
         try manager.add(remote, sftpSecrets: secrets.sftp, s3Secrets: secrets.s3,
@@ -62,7 +63,7 @@ enum IntegrationHarness {
             TestDebug.log("teardown main-actor body start")
             defer { TestDebug.log("teardown main-actor body finish") }
             manager.shutdownAll()
-            try? manager.delete(remote.id)
+            try? await manager.delete(remote.id)
             try? FileManager.default.removeItem(at: dir)
         }
 
@@ -130,6 +131,7 @@ extension IntegrationHarness {
             keychain: KeychainService(serviceName: "rmount.it.\(UUID().uuidString)"),
             mounter: Mounter(), logsDir: dir.appendingPathComponent("logs"),
             rcloneBinary: try RcloneBinary.resolve(), finderBadgeTracker: FinderBadgeTracker(writer: NoopFinderBadgeStatusWriter()))
+        manager.allowMissingHostKeyVerifier = true
         let remote = Remote(id: UUID(), name: "rmount-it-test", backend: backend,
                             mountProtocol: .webdav, autoMount: false)
         return await manager.testConnection(remote, draft: draft)

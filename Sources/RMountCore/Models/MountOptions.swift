@@ -22,4 +22,10 @@ public enum MountOptions {
         }
         return a
     }
+
+    /// `--cache-dir` for a remote's own VFS cache, so pending uploads of one remote can never be
+    /// picked up by another (rclone's default cache dir is shared by every rclone process).
+    public static func cacheDirArgs(_ dir: URL) -> [String] {
+        ["--cache-dir", dir.path]
+    }
 }

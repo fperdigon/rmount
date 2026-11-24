@@ -11,6 +11,11 @@
 set -euo pipefail
 
 KEEP_NIGHTLIES="${KEEP_NIGHTLIES:-1}"
+# Nightlies are published from main only (a manual run of another branch must not publish).
+if [ "${GITHUB_REF:-}" != "refs/heads/main" ]; then
+  echo "Refusing to publish a nightly from ${GITHUB_REF:-<unset ref>}; only refs/heads/main may." >&2
+  exit 1
+fi
 sha="${GITHUB_SHA:?GITHUB_SHA is required}"
 short="${sha:0:7}"
 day="$(date -u +%Y-%m-%d)"
@@ -50,7 +55,9 @@ fi
     echo
     printf '%s\n' "$prev_history"
   fi
-} | head -c 100000 > notes.md
+} > notes.md
+# A file, not `| head -c`: the early exit would SIGPIPE the producer (status 141 under pipefail).
+"$(dirname "$0")/truncate-notes.sh" notes.md 100000
 
 for f in dist/*.dmg; do
   mv "$f" "${f%.dmg}-nightly-${day}-${short}.dmg"

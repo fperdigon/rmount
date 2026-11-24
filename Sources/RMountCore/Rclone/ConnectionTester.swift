@@ -37,51 +37,29 @@ public enum ConnectionTester {
         }
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        let p = Process()
-        p.executableURL = binary
-        p.arguments = [
-            "lsf", "\(RcloneConfigBuilder.sectionName):\(remotePath)",
-            "--config", config.path, "--max-depth", "1",
-            "--contimeout", "15s", "--timeout", "20s", "--retries", "1", "--low-level-retries", "1",
-        ]
         var environment = ProcessInfo.processInfo.environment
         for (k, v) in env { environment[k] = v }
-        p.environment = environment
-        let out = Pipe(), err = Pipe()
-        p.standardOutput = out
-        p.standardError = err
-        do { try p.run() } catch { return .failure("Could not start rclone: \(error.localizedDescription)") }
+        let result: ProcessResult
+        do {
+            result = try ProcessRunner.run(
+                executable: binary,
+                arguments: [
+                    "lsf", "\(RcloneConfigBuilder.sectionName):\(remotePath)",
+                    "--config", config.path, "--max-depth", "1",
+                    "--contimeout", "15s", "--timeout", "20s", "--retries", "1", "--low-level-retries", "1",
+                ],
+                environment: environment,
+                timeout: timeout)
+        } catch { return .failure("Could not start rclone: \(error.localizedDescription)") }
 
-        var timedOut = false
-        let lock = NSLock()
-        let timer = DispatchWorkItem {
-            guard p.isRunning else { return }
-            lock.lock(); timedOut = true; lock.unlock()
-            p.terminate()
-        }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
-
-        // Drain stderr on another thread so a chatty rclone can't fill the pipe and block.
-        var errData = Data()
-        let errDone = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            errData = err.fileHandleForReading.readDataToEndOfFile()
-            errDone.signal()
-        }
-        let outData = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        errDone.wait()
-        timer.cancel()
-
-        lock.lock(); let didTimeOut = timedOut; lock.unlock()
-        if didTimeOut { return .failure("The server did not answer in time — check host, port and network.") }
-        if p.terminationStatus == 0 {
-            let count = String(decoding: outData, as: UTF8.self)
+        if result.timedOut { return .failure("The server did not answer in time — check host, port and network.") }
+        if result.status == 0 {
+            let count = result.stdoutString
                 .split(separator: "\n", omittingEmptySubsequences: true).count
             return .success(count == 0 ? "Connected (the folder is empty)"
                                        : "Connected — \(count) item\(count == 1 ? "" : "s") found")
         }
-        let stderr = String(decoding: errData, as: UTF8.self)
+        let stderr = result.stderrString
         let detail = stderr.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }.suffix(3).joined(separator: "\n")
         return .failure(explain(stderr: stderr), detail: detail)

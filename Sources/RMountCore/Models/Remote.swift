@@ -16,6 +16,9 @@ public struct Remote: Codable, Equatable, Identifiable {
     public var readOnly: Bool
     /// rclone `--bwlimit` such as `10M` or `10M:1M`; nil = unlimited.
     public var bandwidthLimit: String?
+    /// True once this remote uses its own rclone cache dir. Remotes saved before that existed decode
+    /// as false and keep rclone's old shared cache until a mount with no pending uploads.
+    public var cacheMigrated: Bool
 
     public init(
         id: UUID,
@@ -27,8 +30,10 @@ public struct Remote: Codable, Equatable, Identifiable {
         tuning: TransferTuning? = nil,
         readOnly: Bool = false,
         bandwidthLimit: String? = nil,
-        updateMode: UpdateMode = .energySaver
+        updateMode: UpdateMode = .energySaver,
+        cacheMigrated: Bool = true
     ) {
+        self.cacheMigrated = cacheMigrated
         self.id = id
         self.name = name
         self.backend = backend
@@ -50,7 +55,7 @@ public struct Remote: Codable, Equatable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, backend, mountProtocol, autoMount, liveUpdates, tuning, readOnly, bandwidthLimit, updateMode
+        case id, name, backend, mountProtocol, autoMount, liveUpdates, tuning, readOnly, bandwidthLimit, updateMode, cacheMigrated
     }
 
     public init(from decoder: Decoder) throws {
@@ -67,6 +72,7 @@ public struct Remote: Codable, Equatable, Identifiable {
         self.tuning = try c.decodeIfPresent(TransferTuning.self, forKey: .tuning)
         self.readOnly = try c.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
         self.bandwidthLimit = try c.decodeIfPresent(String.self, forKey: .bandwidthLimit)
+        self.cacheMigrated = try c.decodeIfPresent(Bool.self, forKey: .cacheMigrated) ?? false
     }
 }
 

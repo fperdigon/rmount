@@ -10,6 +10,12 @@ public enum UpdateInstaller {
         case mountFailed(String)
         case appNotFound(String)
         case replaceFailed(String)
+        case digestMissing
+        case bundleIdentifierMismatch(expected: String?, found: String?)
+        case codeSignatureInvalid(String)
+        case downgrade(current: String, new: String)
+        case releaseSignatureMissing
+        case releaseSignatureInvalid
 
         public var errorDescription: String? {
             switch self {
@@ -20,6 +26,14 @@ public enum UpdateInstaller {
             case .mountFailed(let m): return "Could not open the downloaded disk image: \(m)"
             case .appNotFound(let n): return "The downloaded disk image does not contain \(n)."
             case .replaceFailed(let m): return "Could not replace the installed app: \(m)"
+            case .digestMissing: return "GitHub did not publish a SHA-256 checksum for this download, so it cannot be verified and was not installed."
+            case .bundleIdentifierMismatch(let expected, let found):
+                return "The downloaded app is not RMount (bundle id \(found ?? "missing"), expected \(expected ?? "unknown")), so it was not installed."
+            case .codeSignatureInvalid(let m): return "The downloaded app's code signature is broken, so it was not installed: \(m)"
+            case .downgrade(let current, let new):
+                return "The downloaded app (\(new)) is older than the running one (\(current)), so it was not installed."
+            case .releaseSignatureMissing: return "This release has no signature file, so it was not installed."
+            case .releaseSignatureInvalid: return "The release signature does not match the download, so it was discarded."
             }
         }
     }
@@ -55,11 +69,11 @@ public enum UpdateInstaller {
     }
 
     /// Throws `checksumMismatch` unless the file matches `expected` ("sha256:<hex>" or bare hex).
-    /// A nil or non-SHA-256 `expected` skips the check (GitHub does not always report a digest).
+    /// A nil, empty or non-SHA-256 `expected` throws `digestMissing`: an unverifiable download is never installed.
     public static func verify(file: URL, expected: String?) throws {
-        guard var want = expected?.lowercased(), !want.isEmpty else { return }
+        guard var want = expected?.lowercased(), !want.isEmpty else { throw InstallError.digestMissing }
         if want.hasPrefix("sha256:") { want = String(want.dropFirst(7)) }
-        else if want.contains(":") { return }
+        else if want.contains(":") { throw InstallError.digestMissing }
         guard try sha256(of: file) == want else { throw InstallError.checksumMismatch }
     }
 
@@ -132,14 +146,24 @@ public enum UpdateInstaller {
     /// (macsh.app updated to rmount.app), a sibling with the new name, with the old bundle moved
     /// to the Trash.
     @discardableResult
-    public static func install(dmg: URL, expectedDigest: String?, over current: URL) throws -> URL {
+    ///
+    /// Before anything is mounted the digest must match (and the Ed25519 release signature, when
+    /// `releaseKey` is given). Before the swap the staged app must have RMount's bundle id, a valid
+    /// code signature and, on the stable channel, not be older than the running app.
+    public static func install(dmg: URL, expectedDigest: String?, over current: URL,
+                               channel: UpdateChannel = .stable,
+                               releaseKey: Data? = nil, releaseSignature: Data? = nil) throws -> URL {
         try verify(file: dmg, expected: expectedDigest)
+        if let releaseKey {
+            try UpdateSignature.verify(file: dmg, signature: releaseSignature, publicKey: releaseKey)
+        }
         guard canReplace(current) else {
             throw InstallError.notWritable(current.deletingLastPathComponent().path)
         }
         let staging = current.deletingLastPathComponent().appendingPathComponent(".rmount-update-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: staging) }
         let staged = try extractApp(fromDMG: dmg, into: staging) { appName(inMountedDMG: $0, matching: current.lastPathComponent) }
+        try verifyStaged(staged, replacing: current, channel: channel)
         clearQuarantine(staged)
         guard staged.lastPathComponent != current.lastPathComponent else {
             try replaceApp(at: current, with: staged)
@@ -156,18 +180,51 @@ public enum UpdateInstaller {
         return target
     }
 
-    /// A detached process that waits for this app to quit, then opens the (new) app.
-    public static func relaunchProcess(appURL: URL) -> Process {
+    /// Checks the extracted app before it replaces `current`: same bundle id (the `ai.macsh` ids
+    /// map to their `ai.rmount` successors), `codesign --verify --deep --strict` passes, and on the
+    /// stable channel the version is not lower than the running one.
+    static func verifyStaged(_ staged: URL, replacing current: URL, channel: UpdateChannel) throws {
+        let new = Bundle(url: staged)?.infoDictionary
+        let old = Bundle(url: current)?.infoDictionary
+        let expectedID = old?["CFBundleIdentifier"] as? String
+        let foundID = new?["CFBundleIdentifier"] as? String
+        var allowed = Set<String>()
+        if let expectedID {
+            allowed.insert(expectedID)
+            if expectedID.hasPrefix(LegacyNames.bundleIDPrefix) {
+                allowed.insert(LegacyNames.currentBundleIDPrefix + expectedID.dropFirst(LegacyNames.bundleIDPrefix.count))
+            }
+        }
+        guard let foundID, allowed.contains(foundID) else {
+            throw InstallError.bundleIdentifierMismatch(expected: expectedID, found: foundID)
+        }
+        let seal = run("/usr/bin/codesign", ["--verify", "--deep", "--strict", staged.path])
+        guard seal.status == 0 else {
+            throw InstallError.codeSignatureInvalid(seal.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        if channel == .stable {
+            let newVersion = (new?["CFBundleShortVersionString"] as? String) ?? "0"
+            let oldVersion = (old?["CFBundleShortVersionString"] as? String) ?? "0"
+            if VersionCompare.compare(newVersion, oldVersion) < 0 {
+                throw InstallError.downgrade(current: oldVersion, new: newVersion)
+            }
+        }
+    }
+
+    /// A detached process that waits for the old process (`pid`) to exit, then opens the (new) app.
+    /// The wait is bounded (about 30 s), and `open` runs without `-n` so a copy that is still
+    /// alive is reused instead of a second one being started.
+    public static func relaunchProcess(appURL: URL, pid: Int32 = ProcessInfo.processInfo.processIdentifier) -> Process {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         let path = appURL.path.replacingOccurrences(of: "'", with: "'\\''")
-        p.arguments = ["-c", "sleep 1; /usr/bin/open -n '\(path)'"]
+        p.arguments = ["-c", "i=0; while kill -0 \(pid) 2>/dev/null && [ $i -lt 150 ]; do sleep 0.2; i=$((i+1)); done; /usr/bin/open '\(path)'"]
         return p
     }
 
     // MARK: Process helper
 
-    private static func run(_ exe: String, _ args: [String]) -> (status: Int32, stderr: String) {
+    static func run(_ exe: String, _ args: [String]) -> (status: Int32, stderr: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = args

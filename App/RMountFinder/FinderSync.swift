@@ -13,6 +13,8 @@ final class FinderSync: FIFinderSync {
     private var requestedPaths: Set<String> = []
     private var roots: Set<URL> = []
     private var lastError: String?
+    /// Cap on remembered paths; Finder re-requests badges for visible items, so dropping is safe.
+    private let requestedPathLimit = 5000
 
     override init() {
         super.init()
@@ -36,6 +38,18 @@ final class FinderSync: FIFinderSync {
         }
         armWatcher()
         reload(reason: "startup")
+        updateTimer()
+    }
+
+    /// The 1 s poll is only a safety net for missed watcher events, so it runs only while
+    /// there is something mounted; the directory watcher stays armed and restarts it.
+    private func updateTimer() {
+        if roots.isEmpty && watcher != nil {
+            timer?.cancel()
+            timer = nil
+            return
+        }
+        guard timer == nil else { return }
         let source = DispatchSource.makeTimerSource(queue: .main)
         source.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(50))
         source.setEventHandler { [weak self] in
@@ -65,6 +79,7 @@ final class FinderSync: FIFinderSync {
                 self.watcher = nil
             }
             self.reload(reason: "watcher")
+            self.updateTimer()   // a lost watcher needs the poll to re-arm it
         }
         source.setCancelHandler { close(fd) }
         watcher = source
@@ -80,6 +95,13 @@ final class FinderSync: FIFinderSync {
                 data = try JSONEncoder().encode(FinderBadgeSnapshot(roots: [], items: [], writtenAt: 0))
             }
             guard data != lastData else { return }
+            // A newer app may write a layout this extension cannot read: keep the last valid snapshot.
+            guard FinderBadgeSnapshot.isSupported(data: data) else {
+                let message = "unsupported snapshot schemaVersion \(FinderBadgeSnapshot.schemaVersion(of: data))"
+                if message != lastError { Trace.event("extension reload error=\(message); retaining last valid snapshot") }
+                lastError = message
+                return
+            }
             let snapshot = try JSONDecoder().decode(FinderBadgeSnapshot.self, from: data).validated()
             let nextRoots = Set(snapshot.roots.map { URL(fileURLWithPath: $0, isDirectory: true) })
             let next = Dictionary(uniqueKeysWithValues: snapshot.items.map { ($0.path, $0.badgeIdentifier) })
@@ -92,7 +114,12 @@ final class FinderSync: FIFinderSync {
             }
             badges = next
             roots = nextRoots
-            if rootsChanged { FIFinderSyncController.default().directoryURLs = roots }
+            if rootsChanged {
+                FIFinderSyncController.default().directoryURLs = roots
+                // Forget paths outside the new roots so the set cannot grow across mounts.
+                requestedPaths = requestedPaths.filter { contains($0, in: roots) }
+                updateTimer()
+            }
             for (path, badge) in next where requestedPaths.contains(path) && contains(path, in: roots) && (rootsChanged || old[path] != badge) {
                 apply(badge, to: URL(fileURLWithPath: path), reason: "change")
             }
@@ -131,6 +158,7 @@ final class FinderSync: FIFinderSync {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let path = url.standardizedFileURL.path
+            if self.requestedPaths.count >= self.requestedPathLimit { self.requestedPaths.removeAll(keepingCapacity: true) }
             self.requestedPaths.insert(path)
             self.apply(self.contains(path, in: self.roots) ? (self.badges[path] ?? "") : "", to: url, reason: "request")
         }

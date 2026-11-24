@@ -6,6 +6,37 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A mount that is still starting can now be cancelled from the menu, and deleting a remote or quitting during start no longer leaves rclone or the volume behind. Edit and Delete are disabled while a remote is starting or stopping.
+- Deleting a mounted remote and quitting no longer freeze the menu bar while a volume unmounts: deleting unmounts in the background, quitting unmounts all remotes in parallel with a time limit, and a hung `diskutil` is killed after 30 seconds.
+- Unmount no longer force-unmounts a volume that is in use: it says so and offers Force Unmount.
+- If rclone exits unexpectedly, a refreshed sign-in token is now saved before its temporary config is deleted, and leftover temporary configs and decrypted keys from a crash are removed at launch.
+- Each remote now has its own rclone cache folder (`Application Support/ai.rmount/cache/<id>`), so files waiting to upload can no longer be picked up by a different remote. Deleting a remote removes its cache unless uploads were still pending. Existing remotes keep rclone's old shared cache (never deleted) until a mount with no pending uploads, so nothing waiting to upload is lost on upgrade.
+- At launch RMount now stops its own rclone processes left behind by a crashed run and unmounts their localhost volumes, also for remotes renamed or deleted since; other rclone processes are never touched.
+### Security
+
+- Passwords, the local WebDAV credentials and the OAuth client secret no longer appear in rclone's command line (visible to other local users in `ps`); they go through stdin and environment variables. A failing `rclone obscure` now errors instead of mounting with an empty password.
+- One unreadable entry in `remotes.json` no longer stops RMount from starting: the other remotes load, the unreadable entry is kept as is (after a `remotes.json.bak` backup) and a notice says what was skipped.
+### Security
+
+- Remote names are checked on add, edit and import, and the NFS mountpoint is built from a sanitized name that must stay under `~/rmount`, so a name such as `a/b` or `../x` no longer breaks mounting or escapes the folder.
+- Line breaks and control characters in host, user and option values are refused instead of being written into the rclone config.
+- An SFTP connection is never started without host-key checking.
+### Security
+
+- A local process can no longer take the port rclone is about to serve on: the mount now checks that the listener is its own rclone and retries with fresh ports if rclone could not bind.
+### Security
+
+- The bundled rclone is now a pinned version (v1.76.0) whose SHA-256 is checked at build time; the build fails on a mismatch.
+### Changed
+
+- The Finder badge snapshot now carries a schema version, and the extension ignores snapshots from a newer app.
+- After an update, RMount now relaunches only once the old copy has quit, so a second copy no longer starts.
+### Security
+
+- The updater now refuses a download that has no SHA-256 checksum, and before swapping the app it checks that the new app has RMount's bundle id, a valid code signature and (stable channel) is not older than the running version.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed

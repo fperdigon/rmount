@@ -89,7 +89,7 @@ final class GoogleDriveIntegrationTests: DebugTestCase {
         addDebugTeardownBlock { @MainActor in
             TestDebug.log("teardown main-actor body start")
             defer { TestDebug.log("teardown main-actor body finish") }
-            manager.shutdownAll(); try? manager.delete(remote.id); try? FileManager.default.removeItem(at: dir)
+            manager.shutdownAll(); try? await manager.delete(remote.id); try? FileManager.default.removeItem(at: dir)
         }
 
         try await manager.mount(remoteID: remote.id)

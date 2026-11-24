@@ -54,7 +54,11 @@ mkdir -p "$DIST"
 build_target() {
     local scheme="$1"
     echo "==> xcodebuild ${scheme} (Release)"
-    xcodebuild \
+    # Drop the previous product so a failed build can never leave a stale app to be packaged.
+    rm -rf "$PRODUCTS/$scheme.app"
+    # grep only trims the log; its "no match" status must not hide xcodebuild's own, so the
+    # filter swallows its status and pipefail carries xcodebuild's failure out of the pipeline.
+    if ! xcodebuild \
         -project App/rmount.xcodeproj \
         -scheme "$scheme" \
         -configuration Release \
@@ -66,10 +70,18 @@ build_target() {
         RMOUNT_BUILD_SHA="$BUILD_SHA" \
         RMOUNT_BUILD_KIND="$BUILD_KIND" \
         build \
-        | grep -E '(error:|warning:.*deprecated|BUILD SUCCEEDED|BUILD FAILED)' \
-        || true
+        | { grep -E '(error:|warning:.*deprecated|BUILD SUCCEEDED|BUILD FAILED)' || true; }; then
+        echo "error: xcodebuild failed for ${scheme}" >&2
+        exit 1
+    fi
     if [[ ! -d "$PRODUCTS/$scheme.app" ]]; then
         echo "error: $PRODUCTS/$scheme.app not produced" >&2
+        exit 1
+    fi
+    local built
+    built="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PRODUCTS/$scheme.app/Contents/Info.plist")"
+    if [[ "$built" != "$VERSION" ]]; then
+        echo "error: $scheme.app is version $built, expected $VERSION" >&2
         exit 1
     fi
 }

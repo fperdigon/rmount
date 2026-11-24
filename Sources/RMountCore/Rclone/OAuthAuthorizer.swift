@@ -34,7 +34,7 @@ public final class OAuthAuthorizer {
     }
 
     /// Returns the token JSON. `scope` reaches rclone as `RCLONE_<BACKEND>_SCOPE`; a custom
-    /// client ID and secret (both required together) are passed as rclone arguments.
+    /// client ID and secret (both required together) are passed as RCLONE_<BACKEND>_CLIENT_ID/_SECRET environment variables.
     public func authorize(
         binary: URL, backend: String, clientID: String? = nil, clientSecret: String? = nil,
         scope: String? = nil, timeout: TimeInterval = 300
@@ -56,7 +56,7 @@ public final class OAuthAuthorizer {
         binary: URL, backend: String, clientID: String?, clientSecret: String?,
         scope: String?, timeout: TimeInterval
     ) throws -> String {
-        var args = ["authorize", backend]
+        let args = ["authorize", backend]
         let id = (clientID ?? "").trimmingCharacters(in: .whitespaces)
         let secret = (clientSecret ?? "").trimmingCharacters(in: .whitespaces)
         // Half a pair used to fall back to rclone's shared client silently. That token only
@@ -67,33 +67,34 @@ public final class OAuthAuthorizer {
                 ? "A client secret was entered without a client ID. Enter both, or clear both to use rclone's shared client."
                 : "Enter the client secret together with the client ID (Google does not show it again; add a new secret in the console), or clear the client ID.")
         }
-        if !id.isEmpty { args += [id, secret] }
-        let p = Process()
-        p.executableURL = binary
-        p.arguments = args
         var env = ProcessInfo.processInfo.environment
         if let scope, !scope.isEmpty { env["RCLONE_\(backend.uppercased())_SCOPE"] = scope }
-        p.environment = env
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = out
-
-        lock.lock(); cancelled = false; timedOut = false; lock.unlock()
-        do { try p.run() } catch { throw OAuthError.launchFailed(error.localizedDescription) }
-        lock.lock(); process = p; lock.unlock()
-        defer { lock.lock(); process = nil; lock.unlock() }
-
-        let timer = DispatchWorkItem { [weak self] in
-            guard let self, p.isRunning else { return }
-            self.lock.lock(); self.timedOut = true; self.lock.unlock()
-            p.terminate()
+        // Client ID and secret go through the environment: positional arguments would show the secret to `ps`.
+        if !id.isEmpty {
+            env["RCLONE_\(backend.uppercased())_CLIENT_ID"] = id
+            env["RCLONE_\(backend.uppercased())_CLIENT_SECRET"] = secret
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
 
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        timer.cancel()
-        let text = String(decoding: data, as: UTF8.self)
+        // A cancel() that arrived before the process was stored must still take effect, so
+        // `cancelled` is not reset here; it is cleared when the run ends.
+        lock.lock(); timedOut = false; let alreadyCancelled = cancelled; lock.unlock()
+        if alreadyCancelled {
+            lock.lock(); cancelled = false; lock.unlock()
+            throw OAuthError.cancelled
+        }
+        defer { lock.lock(); process = nil; cancelled = false; lock.unlock() }
+        let result: ProcessResult
+        do {
+            result = try ProcessRunner.run(
+                executable: binary, arguments: args, environment: env, mergeStderr: true, timeout: timeout,
+                onStart: { [weak self] p in
+                    guard let self else { return }
+                    self.lock.lock(); self.process = p; let cancelledWhileLaunching = self.cancelled; self.lock.unlock()
+                    if cancelledWhileLaunching { p.terminate() }
+                })
+        } catch { throw OAuthError.launchFailed(error.localizedDescription) }
+        if result.timedOut { lock.lock(); timedOut = true; lock.unlock() }
+        let text = result.stdoutString
 
         if let token = Self.parseToken(from: text) { return token }
         lock.lock(); let wasCancelled = cancelled, wasTimedOut = timedOut; lock.unlock()

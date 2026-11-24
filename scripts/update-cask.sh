@@ -12,7 +12,13 @@ dist="${DIST:-dist}"
 tap_url="${TAP_URL:-}"
 if [ -z "$tap_url" ]; then
     : "${HOMEBREW_TAP_TOKEN:?set HOMEBREW_TAP_TOKEN or TAP_URL}"
-    tap_url="https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/fperdigon/homebrew-tap.git"
+    tap_url="https://github.com/fperdigon/homebrew-tap.git"
+    # The token goes in an HTTP header for this process only, so it is not written to the clone's
+    # .git/config or visible in the remote URL. Git reads the config from the environment.
+    auth="$(printf 'x-access-token:%s' "$HOMEBREW_TAP_TOKEN" | base64 | tr -d '\n')"
+    export GIT_CONFIG_COUNT=1
+    export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+    export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}"
 fi
 
 work="$(mktemp -d)"

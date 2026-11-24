@@ -58,7 +58,11 @@ final class OAuthAuthorizerTests: DebugTestCase {
             binary: rclone.binary, backend: "drive", clientID: "cid", clientSecret: "csecret", scope: "drive.readonly")
         XCTAssertTrue(token.contains(#""refresh_token":"RT""#))
         let lines = rclone.recordedLines()
-        XCTAssertEqual(Array(lines.prefix(4)), ["authorize", "drive", "cid", "csecret"])
+        XCTAssertEqual(lines.first, "authorize")
+        XCTAssertFalse(lines.contains("csecret"), "the client secret must not be in argv")
+        XCTAssertFalse(lines.contains("cid"))
+        XCTAssertTrue(lines.contains("ENV:RCLONE_DRIVE_CLIENT_ID=cid"))
+        XCTAssertTrue(lines.contains("ENV:RCLONE_DRIVE_CLIENT_SECRET=csecret"))
         XCTAssertTrue(lines.contains("ENV:RCLONE_DRIVE_SCOPE=drive.readonly"))
     }
 
@@ -106,6 +110,19 @@ final class OAuthAuthorizerTests: DebugTestCase {
         auth.cancel()
         do {
             _ = try await task.value
+            XCTFail("expected cancellation")
+        } catch {
+            XCTAssertEqual(error as? OAuthError, .cancelled)
+        }
+    }
+
+    func testCancelBeforeProcessIsStoredStillCancels() async throws {
+        let (rclone, dir) = try make()
+        try "hang".write(to: dir.appendingPathComponent("authorize-mode.txt"), atomically: true, encoding: .utf8)
+        let auth = OAuthAuthorizer()
+        auth.cancel()    // arrives before authorize() has launched anything
+        do {
+            _ = try await auth.authorize(binary: rclone.binary, backend: "drive")
             XCTFail("expected cancellation")
         } catch {
             XCTAssertEqual(error as? OAuthError, .cancelled)

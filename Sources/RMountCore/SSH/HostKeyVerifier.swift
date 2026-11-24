@@ -16,10 +16,12 @@ public protocol HostKeyPrompter: AnyObject {
     func confirmChange(host: String, port: Int, oldFingerprint: String, newFingerprint: String) -> Bool
 }
 
-public enum HostKeyError: Error, LocalizedError {
+public enum HostKeyError: Error, Equatable, LocalizedError {
     case keyscanFailed(stderr: String)
     case rejectedByUser
     case fingerprintComputationFailed
+    case verifierUnavailable
+    case invalidHost
 
     public var errorDescription: String? {
         switch self {
@@ -31,6 +33,10 @@ public enum HostKeyError: Error, LocalizedError {
             return "Host key was not accepted"
         case .fingerprintComputationFailed:
             return "Could not compute the host key fingerprint"
+        case .verifierUnavailable:
+            return "Host key checking is not available, so the SFTP connection was not started."
+        case .invalidHost:
+            return "The host name is not valid."
         }
     }
 }
@@ -73,6 +79,10 @@ public final class HostKeyVerifier {
 
     /// Blocking: runs `ssh-keyscan` / `ssh-keygen`. Safe to call from a background thread.
     nonisolated public func inspect(host: String, port: Int) throws -> Inspection {
+        // A host starting with "-" would be read by ssh-keyscan as an option.
+        guard !host.hasPrefix("-"), !host.unicodeScalars.contains(where: { RemoteName.isControl($0) }) else {
+            throw HostKeyError.invalidHost
+        }
         let existing = readExistingLines(host: host, port: port)
         let liveLines = try keyscan(host: host, port: port)
         guard !liveLines.isEmpty else {
@@ -141,18 +151,14 @@ public final class HostKeyVerifier {
 
     nonisolated private func keyscan(host: String, port: Int) throws -> [String] {
         let exe = "/usr/bin/ssh-keyscan"
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: exe)
-        p.arguments = ["-T", "5", "-p", String(port), "-t", "ed25519,rsa,ecdsa", host]
-        let outPipe = Pipe(); let errPipe = Pipe()
-        p.standardOutput = outPipe; p.standardError = errPipe
-        try p.run()
-        p.waitUntilExit()
-        if p.terminationStatus != 0 {
-            let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw HostKeyError.keyscanFailed(stderr: err)
+        let r = try ProcessRunner.run(
+            executable: URL(fileURLWithPath: exe),
+            arguments: ["-T", "5", "-p", String(port), "-t", "ed25519,rsa,ecdsa", host],
+            timeout: 30)
+        if r.status != 0 {
+            throw HostKeyError.keyscanFailed(stderr: r.stderrString)
         }
-        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let out = r.stdoutString
         return out.split(separator: "\n")
             .map { String($0) }
             .filter { !$0.hasPrefix("#") && !$0.isEmpty }
@@ -164,14 +170,10 @@ public final class HostKeyVerifier {
             .appendingPathComponent("rmount-fp-\(UUID().uuidString)")
         try line.write(to: tmp, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tmp) }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
-        p.arguments = ["-lf", tmp.path]
-        let outPipe = Pipe(); p.standardOutput = outPipe; p.standardError = Pipe()
-        try p.run()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { throw HostKeyError.fingerprintComputationFailed }
-        let raw = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let r = try ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/ssh-keygen"), arguments: ["-lf", tmp.path], timeout: 15)
+        guard r.status == 0 else { throw HostKeyError.fingerprintComputationFailed }
+        let raw = r.stdoutString
         let parts = raw.split(separator: " ", maxSplits: 4, omittingEmptySubsequences: true)
         return parts.count >= 2 ? String(parts[1]) : raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }

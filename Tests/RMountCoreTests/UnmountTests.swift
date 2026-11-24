@@ -28,4 +28,19 @@ final class UnmountTests: DebugTestCase {
     func testUnmountOfMissingPathSucceeds() {
         XCTAssertNoThrow(try Mounter().unmount(mountpoint: dir.appendingPathComponent("gone").path))
     }
+
+    func testBusyFailureDetection() {
+        XCTAssertTrue(Mounter.isBusyFailure("Volume on disk4 failed to unmount: dissented by PID 123 (Finder)"))
+        XCTAssertTrue(Mounter.isBusyFailure("resource busy"))
+        XCTAssertFalse(Mounter.isBusyFailure("no such volume"))
+    }
+
+    func testBusyErrorDescription() {
+        XCTAssertEqual(Mounter.MountError.busy(mountpoint: "/Volumes/x").errorDescription,
+                       "/Volumes/x is in use by an app or Finder, so it was not unmounted.")
+    }
+
+    func testForcedUnmountOfUnmountedPathSucceeds() {
+        XCTAssertNoThrow(try Mounter().unmount(mountpoint: dir.path, force: true))
+    }
 }

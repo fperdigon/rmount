@@ -74,7 +74,7 @@ final class MenuBarController {
                     submenu.addItem(NSMenuItem.separator())
                 }
                 let mountToggle = NSMenuItem(
-                    title: isMounted(session) ? "Unmount" : "Mount",
+                    title: isMounted(session) ? "Unmount" : (session.status == .starting ? "Cancel mounting" : "Mount"),
                     action: #selector(toggleMount(_:)),
                     keyEquivalent: ""
                 )
@@ -92,12 +92,12 @@ final class MenuBarController {
                 let edit = NSMenuItem(title: "Edit…", action: #selector(editRemote(_:)), keyEquivalent: "")
                 edit.target = self
                 edit.representedObject = session.id
-                edit.isEnabled = !isMounted(session)
+                edit.isEnabled = !isMounted(session) && !isBusy(session)
                 submenu.addItem(edit)
                 let delete = NSMenuItem(title: "Delete remote", action: #selector(deleteRemote(_:)), keyEquivalent: "")
                 delete.target = self
                 delete.representedObject = session.id
-                delete.isEnabled = !isMounted(session)
+                delete.isEnabled = !isMounted(session) && !isBusy(session)
                 submenu.addItem(delete)
                 item.submenu = submenu
                 menu.addItem(item)
@@ -142,6 +142,14 @@ final class MenuBarController {
         )
     }
 
+    /// Starting or stopping: Edit and Delete would race the work in flight.
+    private func isBusy(_ session: RemoteSession) -> Bool {
+        switch session.status {
+        case .starting, .stopping: return true
+        default: return false
+        }
+    }
+
     private func isMounted(_ session: RemoteSession) -> Bool {
         if case .mounted = session.status { return true }
         return false
@@ -165,18 +173,33 @@ final class MenuBarController {
         Task { @MainActor in
             do {
                 switch session.status {
-                case .starting, .stopping: return        // already working on it
+                case .starting: manager.cancelMount(remoteID: id)
+                case .stopping: return        // already working on it
                 case .mounted:
                     await manager.refreshUploadStatus(remoteID: id)
                     let uploads = manager.uploadStatus[id].map { [(remoteName: session.remote.name, status: $0)] } ?? []
                     guard UploadSafetyAlert.confirm(UploadGuard.warning(for: .unmount, uploads: uploads)) else { return }
-                    try await manager.unmount(remoteID: id)
+                    do { try await manager.unmount(remoteID: id) }
+                    catch Mounter.MountError.busy {
+                        guard Self.confirmForceUnmount(session.remote.name) else { return }
+                        try await manager.unmount(remoteID: id, force: true)
+                    }
                 default: try await manager.mount(remoteID: id)
                 }
             } catch {
                 NSAlert(error: error).runModal()
             }
         }
+    }
+
+    private static func confirmForceUnmount(_ name: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "\(name) is in use"
+        alert.informativeText = "An app or Finder is using this volume. Force Unmount can lose unsaved changes in open files."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Force Unmount")
+        return alert.runModal() == .alertSecondButtonReturn
     }
 
     @objc private func deleteRemote(_ sender: NSMenuItem) {
@@ -193,7 +216,7 @@ final class MenuBarController {
             await manager.refreshUploadStatus(remoteID: id)
             let uploads = manager.uploadStatus[id].map { [(remoteName: session.remote.name, status: $0)] } ?? []
             guard UploadSafetyAlert.confirm(UploadGuard.warning(for: .unmount, uploads: uploads)) else { return }
-            do { try manager.delete(id) }
+            do { try await manager.delete(id) }
             catch { NSAlert(error: error).runModal() }
         }
     }
