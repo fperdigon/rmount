@@ -33,6 +33,7 @@ private final class FakeMounter: Mounter {
     override func resolveMountpoint(name: String) throws -> String { "/Volumes/\(name)" }
 
     override func reconcileLeftoverNFSMounts() -> [String] { [] }
+    override func reconcileOrphanedRclone() -> OrphanReaper.Report { OrphanReaper.Report() }
 
     override func unmount(mountpoint: String) throws { lock.withLock { _unmounted.append(mountpoint) } }
 

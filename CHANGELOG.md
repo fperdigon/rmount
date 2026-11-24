@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- At launch RMount now stops its own rclone processes left behind by a crashed run and unmounts their localhost volumes, also for remotes renamed or deleted since; other rclone processes are never touched.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed
