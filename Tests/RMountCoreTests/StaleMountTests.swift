@@ -143,10 +143,35 @@ final class RcloneExitWatcherTests: DebugTestCase {
         try "k".write(to: staleKey, atomically: true, encoding: .utf8)
         let other = dir.appendingPathComponent("unrelated.txt")
         try "x".write(to: other, atomically: true, encoding: .utf8)
-        XCTAssertEqual(manager.sweepStaleTempItems(in: dir), 2)
+        XCTAssertEqual(manager.sweepStaleTempItems(in: dir, now: Date().addingTimeInterval(120), processLister: { "" }), 2)
         XCTAssertFalse(fm.fileExists(atPath: staleDir.path))
         XCTAssertFalse(fm.fileExists(atPath: staleKey.path))
         XCTAssertTrue(fm.fileExists(atPath: other.path))
+    }
+
+    func testSweepKeepsItemsReferencedByRunningProcessOrRecent() throws {
+        let (manager, _) = makeSession()
+        let fm = FileManager.default
+        let busy = dir.appendingPathComponent("rmount-rclone-busy", isDirectory: true)
+        let busyKey = dir.appendingPathComponent("rmount-key-busy")
+        let stale = dir.appendingPathComponent("rmount-rclone-old", isDirectory: true)
+        for d in [busy, stale] { try fm.createDirectory(at: d, withIntermediateDirectories: true) }
+        try "k".write(to: busyKey, atomically: true, encoding: .utf8)
+        let lister = { "rclone serve --config \(busy.path)/rclone.conf\nX RCLONE_CONFIG_R_KEY_FILE=\(busyKey.path)" }
+        let later = Date().addingTimeInterval(120)
+        XCTAssertEqual(manager.sweepStaleTempItems(in: dir, now: later, processLister: lister), 1)
+        XCTAssertTrue(fm.fileExists(atPath: busy.path))
+        XCTAssertTrue(fm.fileExists(atPath: busyKey.path))
+        XCTAssertFalse(fm.fileExists(atPath: stale.path))
+        // Just created: too recent to touch even with no process referencing it.
+        let fresh = dir.appendingPathComponent("rmount-rclone-fresh", isDirectory: true)
+        try fm.createDirectory(at: fresh, withIntermediateDirectories: true)
+        XCTAssertEqual(manager.sweepStaleTempItems(in: dir, processLister: { "" }), 0)
+        XCTAssertTrue(fm.fileExists(atPath: fresh.path))
+    }
+
+    func testLiveProcessListerReturnsOutput() {
+        XCTAssertFalse(SessionManager.liveProcessCommandLines().isEmpty)
     }
 
     func testSweepKeepsItemsUsedByALiveSession() throws {
@@ -160,7 +185,7 @@ final class RcloneExitWatcherTests: DebugTestCase {
         try "k".write(to: liveKey, atomically: true, encoding: .utf8)
         session.rcloneConfigURL = liveDir.appendingPathComponent("rclone.conf")
         session.ephemeralKeyURL = liveKey
-        XCTAssertEqual(manager.sweepStaleTempItems(in: dir), 0)
+        XCTAssertEqual(manager.sweepStaleTempItems(in: dir, now: Date().addingTimeInterval(120), processLister: { "" }), 0)
         XCTAssertTrue(fm.fileExists(atPath: liveDir.path))
         XCTAssertTrue(fm.fileExists(atPath: liveKey.path))
     }

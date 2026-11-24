@@ -737,20 +737,48 @@ public final class SessionManager: ObservableObject {
         if session.remote.autoMount { scheduleMount(remoteID: session.id, attempt: 0) }
     }
 
+    /// Command lines (with environment, same user only) of all running processes, or "" on failure.
+    /// Held in memory for one substring search; never logged.
+    public nonisolated static func liveProcessCommandLines() -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/ps")
+        p.arguments = ["-axwwE", "-o", "command="]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return "" }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()   // ends when ps exits
+        return String(decoding: data, as: UTF8.self)
+    }
+
     /// Removes `rmount-rclone-*` dirs and `rmount-key-*` files left in the temp dir by a crash or
-    /// force-quit (they hold a plaintext config or a decrypted key). Call once at launch, before
-    /// mounting; items used by a live session here are kept.
+    /// force-quit (they hold a plaintext config or a decrypted key). Call once at launch.
+    /// Skips items used by a session here, referenced by any running process (another RMount
+    /// instance or flavor) or modified in the last `minAge` seconds.
     @discardableResult
-    public func sweepStaleTempItems(in dir: URL = FileManager.default.temporaryDirectory) -> Int {
+    public func sweepStaleTempItems(
+        in dir: URL = FileManager.default.temporaryDirectory,
+        minAge: TimeInterval = 60,
+        now: Date = Date(),
+        processLister: () -> String = SessionManager.liveProcessCommandLines
+    ) -> Int {
         var keep = Set<String>()
         for s in sessions {
             if let c = s.rcloneConfigURL { keep.insert(c.deletingLastPathComponent().lastPathComponent) }
             if let k = s.ephemeralKeyURL { keep.insert(k.lastPathComponent) }
         }
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        let fm = FileManager.default
+        let candidates = ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? [])
+            .filter { ($0.hasPrefix("rmount-rclone-") || $0.hasPrefix("rmount-key-")) && !keep.contains($0) }
+        guard !candidates.isEmpty else { return 0 }
+        let live = processLister()
         var removed = 0
-        for name in names where (name.hasPrefix("rmount-rclone-") || name.hasPrefix("rmount-key-")) && !keep.contains(name) {
-            if (try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))) != nil { removed += 1 }
+        for name in candidates {
+            let url = dir.appendingPathComponent(name)
+            if live.contains(name) { continue }
+            if let m = (try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date,
+               now.timeIntervalSince(m) < minAge { continue }
+            if (try? fm.removeItem(at: url)) != nil { removed += 1 }
         }
         return removed
     }
