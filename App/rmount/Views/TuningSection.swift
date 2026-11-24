@@ -9,6 +9,7 @@ struct TuningSection: View {
     @Binding var customize: Bool
     @Binding var updateMode: UpdateMode
     @Binding var tuning: TransferTuning
+    @Binding var autoTransfers: Bool
     let mountProtocol: MountProtocol
     /// rclone backend type ("drive", "onedrive", ...) for generic backends, else nil.
     var backendType: String? = nil
@@ -30,6 +31,14 @@ struct TuningSection: View {
                     Text("The customized values below override this choice.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+                LabeledContent("Uploads") {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Toggle("Tune parallel uploads automatically", isOn: $autoTransfers)
+                        Text("Learns the best number of simultaneous uploads from your own transfers. Off uses rclone's default of 4. Applies at the next mount.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 LabeledContent("Settings") {
                     Toggle("Customize performance settings", isOn: $customize)

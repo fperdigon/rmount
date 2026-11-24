@@ -49,7 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 mounter: mounter,
                 logsDir: supportDir.appendingPathComponent("logs", isDirectory: true),
                 rcloneBinary: binary,
-                hostKeyVerifier: verifier
+                hostKeyVerifier: verifier,
+                transfersBanditDirectory: supportDir.appendingPathComponent("transfers-bandit", isDirectory: true)
             )
             try manager.reload()
             manager.sweepStaleTempItems()

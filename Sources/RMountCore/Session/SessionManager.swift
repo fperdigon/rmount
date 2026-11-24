@@ -6,9 +6,14 @@ import Darwin
 public final class SessionManager: ObservableObject {
     @Published public private(set) var sessions: [RemoteSession] = []
     @Published public private(set) var uploadStatus: [UUID: UploadStatus] = [:]
+    /// Parallel uploads (`--transfers`) currently set per mounted remote that uses automatic tuning.
+    @Published public private(set) var transfersParallelism: [UUID: Int] = [:]
 
     private var uploadMonitors: [UUID: UploadMonitor] = [:]
     private var uploadGenerations: [UUID: UUID] = [:]
+    private var transfersControllers: [UUID: TransfersController] = [:]
+    private let transfersStore: TransfersBanditStore?
+    private let transfersRandom: () -> Double
     private let controlClient: (RcloneProcess.Spawned) -> RcloneControlClient
     private let finderProgressPublisher: FinderProgressPublisher
     private let finderBadgeTracker: FinderBadgeTracker
@@ -50,6 +55,8 @@ public final class SessionManager: ObservableObject {
         preferences: UserPreferences = UserPreferences(),
         finderProgressFactory: FinderProgressFactory? = nil,
         finderBadgeTracker: FinderBadgeTracker? = nil,
+        transfersBanditDirectory: URL? = nil,
+        transfersRandom: @escaping () -> Double = { Double.random(in: 0..<1) },
         controlClient: @escaping (RcloneProcess.Spawned) -> RcloneControlClient = {
             URLSessionRcloneControlClient(port: $0.rcPort, user: $0.rcUser, password: $0.rcPassword)
         }
@@ -63,6 +70,8 @@ public final class SessionManager: ObservableObject {
         self.rcloneBinary = rcloneBinary
         self.hostKeyVerifier = hostKeyVerifier
         self.controlClient = controlClient
+        self.transfersStore = transfersBanditDirectory.map { TransfersBanditStore(directory: $0) }
+        self.transfersRandom = transfersRandom
         self.preferences = preferences
         self.finderProgressPublisher = FinderProgressPublisher(
             factory: finderProgressFactory, isEnabled: preferences.showFinderUploadProgress)
@@ -118,15 +127,24 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    func startUploadMonitor(remoteID: UUID, client: RcloneControlClient) {
+    func startUploadMonitor(remoteID: UUID, client: RcloneControlClient, startingArm: Int? = nil) {
         stopUploadMonitor(remoteID: remoteID)
+        var onSample: ((VFSQueue, RcloneStats?) async -> Void)?
+        if let startingArm, let store = transfersStore,
+           let remote = sessions.first(where: { $0.id == remoteID })?.remote {
+            let controller = TransfersController(
+                remote: remote, startingArm: startingArm, store: store, client: client, random: transfersRandom,
+                onChange: { [weak self] arm in self?.transfersParallelism[remoteID] = arm })
+            transfersControllers[remoteID] = controller
+            onSample = { queue, stats in await controller.observe(queue: queue, stats: stats) }
+        }
         if let session = sessions.first(where: { $0.id == remoteID }) {
             finderBadgeTracker.sync(remoteID: remoteID, remoteName: session.remote.name,
                                     mountpoint: session.mountpoint, status: UploadStatus())
         }
         let generation = UUID()
         uploadGenerations[remoteID] = generation
-        uploadMonitors[remoteID] = UploadMonitor(client: client) { [weak self] status in
+        uploadMonitors[remoteID] = UploadMonitor(client: client, onSample: onSample) { [weak self] status in
             guard let self, self.uploadGenerations[remoteID] == generation else { return }
             if self.uploadStatus[remoteID] != status { self.uploadStatus[remoteID] = status }
             if !status.hasPending, !status.isStale, self.legacyCacheMounts.contains(remoteID) {
@@ -156,6 +174,8 @@ public final class SessionManager: ObservableObject {
     private func stopUploadMonitor(remoteID: UUID) {
         uploadGenerations[remoteID] = nil
         uploadMonitors.removeValue(forKey: remoteID)?.stop()
+        transfersControllers[remoteID] = nil
+        transfersParallelism[remoteID] = nil
         uploadStatus[remoteID] = nil
         finderProgressPublisher.clear(remoteID: remoteID)
         finderBadgeTracker.clear(remoteID: remoteID)
@@ -335,6 +355,7 @@ public final class SessionManager: ObservableObject {
         if let session = sessions.first(where: { $0.id == remoteID }), case .mounted = session.status {
             try? await unmount(remoteID: remoteID, force: true)
         }
+        transfersStore?.remove(remote: remoteID.uuidString)
         try? keychain.delete(remoteID: remoteID, kind: .password)
         try? keychain.delete(remoteID: remoteID, kind: .keyPassphrase)
         try? keychain.delete(remoteID: remoteID, kind: .privateKey)
@@ -704,8 +725,15 @@ public final class SessionManager: ObservableObject {
             let remotePath = prepared.remotePath
             let logURL = logsDir.appendingPathComponent("\(remote.id.uuidString).log")
             let tuning = remote.effectiveTuning
-            let extraArgs = MountOptions.serveArgs(readOnly: remote.readOnly, bandwidthLimit: remote.bandwidthLimit)
+            var extraArgs = MountOptions.serveArgs(readOnly: remote.readOnly, bandwidthLimit: remote.bandwidthLimit)
                 + cacheArgs(for: remote, remotePath: remotePath)
+            // Automatic parallel uploads: start rclone with the best known value (a live change is lost on restart).
+            var transfersArm: Int?
+            if remote.autoTransfers, !remote.readOnly, let store = transfersStore {
+                let arm = TransfersController.startupArm(for: remote, store: store)
+                transfersArm = arm
+                extraArgs += ["--transfers", String(arm)]
+            }
             let runner = RcloneProcess(binary: rcloneBinary, logFile: logURL)
             let volname = mounter.volumeName(from: remote.name)
             func spawnOnce() throws -> RcloneProcess.Spawned {
@@ -797,7 +825,7 @@ public final class SessionManager: ObservableObject {
             session.ephemeralKeyURL = attempt.ephemeralKeyURL
             session.rcloneConfigURL = spawned.configURL
             session.transition(to: .mounted(at: mountpoint))
-            startUploadMonitor(remoteID: remoteID, client: controlClient(spawned))
+            startUploadMonitor(remoteID: remoteID, client: controlClient(spawned), startingArm: transfersArm)
         } catch {
             if attempt.cancelled || !sessions.contains(where: { $0 === session }) {
                 return await finishCancelled()

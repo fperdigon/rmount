@@ -66,6 +66,11 @@ struct TransfersView: View {
                 }
                 if status.hasPending || !section.rows.isEmpty {
                     Text(status.summary.text).font(.subheadline)
+                    if let parallel = manager.transfersParallelism[section.id] {
+                        Text("Parallel uploads: \(parallel) (auto)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     if section.scrollsFiles {
                         Text("\(section.rows.count) files • Scroll to see all files")
                             .font(.caption)

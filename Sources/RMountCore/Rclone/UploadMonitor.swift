@@ -75,10 +75,13 @@ public struct UploadStatus: Equatable {
 public protocol RcloneControlClient {
     func vfsQueue() async throws -> VFSQueue
     func coreStats() async throws -> RcloneStats
+    /// Sets rclone's `--transfers` on the running process (`options/set`); lost when rclone restarts.
+    func setTransfers(_ count: Int) async throws
 }
 
 public extension RcloneControlClient {
     func coreStats() async throws -> RcloneStats { throw URLError(.unsupportedURL) }
+    func setTransfers(_ count: Int) async throws { throw URLError(.unsupportedURL) }
 }
 
 public struct URLSessionRcloneControlClient: RcloneControlClient {
@@ -105,6 +108,17 @@ public struct URLSessionRcloneControlClient: RcloneControlClient {
         return try await perform(statsRequest, as: RcloneStats.self)
     }
 
+    public func setTransfers(_ count: Int) async throws {
+        var setRequest = request
+        setRequest.url = request.url?.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("options/set")
+        setRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        setRequest.httpBody = try JSONSerialization.data(withJSONObject: ["main": ["Transfers": count]])
+        let (_, response) = try await session.data(for: setRequest)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+    }
+
     private func perform<T: Decodable>(_ request: URLRequest, as type: T.Type) async throws -> T {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -126,13 +140,18 @@ final class UploadMonitor {
     private var inFlight: Task<UploadStatus, Never>?
     private let client: RcloneControlClient
     private let onStatus: (UploadStatus) -> Void
+    /// Called after each successful queue poll with the raw queue and (if it worked) the stats.
+    private let onSample: ((VFSQueue, RcloneStats?) async -> Void)?
     private var lastQueue = VFSQueue()
     private var failedPolls = 0
     private var stopped = false
 
-    init(client: RcloneControlClient, intervals: Intervals = Intervals(), onStatus: @escaping (UploadStatus) -> Void) {
+    init(client: RcloneControlClient, intervals: Intervals = Intervals(),
+         onSample: ((VFSQueue, RcloneStats?) async -> Void)? = nil,
+         onStatus: @escaping (UploadStatus) -> Void) {
         self.client = client
         self.onStatus = onStatus
+        self.onSample = onSample
         task = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let status = await self?.refresh() else { return }
@@ -157,6 +176,7 @@ final class UploadMonitor {
             let status = self.lastQueue.status(stats: queueSucceeded ? stats : nil, isStale: self.failedPolls >= 2)
             self.inFlight = nil
             if !self.stopped && !Task.isCancelled { self.onStatus(status) }
+            if queueSucceeded, !self.stopped, !Task.isCancelled { await self.onSample?(self.lastQueue, stats) }
             return status
         }
         inFlight = sample

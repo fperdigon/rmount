@@ -47,7 +47,7 @@ so nothing needs to be installed in the kernel.
 - **Other rclone backend**: any rclone backend type with `name = value` options; secret options are kept in the Keychain, never in a file.
 - **Google Drive**: browser sign-in; optional shared drive, root folder and your own OAuth client.
 - **Import from `rclone.conf`**: bring your existing remotes with you.
-- **Per-remote performance settings**: Energy saving / Responsive updates, cache mode, read-ahead, buffer size, write-back delay.
+- **Per-remote performance settings**: Energy saving / Responsive updates, cache mode, read-ahead, buffer size, write-back delay, and automatic tuning of parallel uploads (`--transfers`) from your own transfer speeds (on by default; switch off under Performance > Uploads to use rclone's default of 4; Google Drive is capped at 8 parallel uploads).
 - **Live updates**: changes on the server show up in seconds in Responsive mode, or within a few minutes in the default Energy saving mode.
 - **Upload status**: open Transfers from the menu to see per-file upload progress, bytes left, speed and estimated time remaining, with a warning before quitting, unmounting or updating.
 - **Finder upload progress**: a small progress circle in Finder's list view follows real uploads, including queued files; enabled by default in General settings.
