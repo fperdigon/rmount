@@ -210,16 +210,9 @@ public class Mounter {
     }
 
     private static func output(of exe: String, _ args: [String]) -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: exe)
-        p.arguments = args
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do { try p.run() } catch { return "" }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(data: data, encoding: .utf8) ?? ""
+        guard let r = try? ProcessRunner.run(executable: URL(fileURLWithPath: exe), arguments: args, timeout: 15)
+        else { return "" }
+        return r.stdoutString
     }
 
     /// If `/Volumes/<volname>` is currently mounted from a `http://127.0.0.1:<port>/...`
@@ -242,16 +235,9 @@ public class Mounter {
     /// the port. Returns nil if the volume isn't mounted, or it's mounted from a
     /// non-localhost source (someone else's mount we shouldn't touch).
     private func staleLocalhostPort(forVolume volname: String) -> Int? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/sbin/mount")
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        p.waitUntilExit()
-        guard let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) else {
-            return nil
-        }
+        guard let r = try? ProcessRunner.run(executable: URL(fileURLWithPath: "/sbin/mount"), timeout: 15),
+              !r.timedOut else { return nil }
+        let text = r.stdoutString
         let suffix = " on /Volumes/\(volname) "
         for line in text.split(separator: "\n") {
             guard line.contains(suffix) else { continue }
@@ -270,17 +256,10 @@ public class Mounter {
     /// have other rclone processes running unrelated to RMount.
     private func killRcloneOnPort(_ port: Int) {
         let pattern = "rclone serve (webdav|nfs).*--addr 127.0.0.1:\(port)( |$)"
-        let pgrep = Process()
-        pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        pgrep.arguments = ["-f", pattern]
-        let out = Pipe()
-        pgrep.standardOutput = out
-        pgrep.standardError = Pipe()
-        do { try pgrep.run() } catch { return }
-        pgrep.waitUntilExit()
-        guard let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) else {
-            return
-        }
+        guard let r = try? ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/pgrep"), arguments: ["-f", pattern], timeout: 15)
+        else { return }
+        let text = r.stdoutString
         for line in text.split(separator: "\n") {
             guard let pid = Int32(line.trimmingCharacters(in: .whitespaces)) else { continue }
             kill(pid, SIGTERM)
@@ -316,14 +295,10 @@ public class Mounter {
 
     /// True when `mountpoint` appears as a mount target in `/sbin/mount` output.
     public func isMounted(mountpoint: String) -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/sbin/mount")
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do { try p.run() } catch { return true }   // can't tell: let diskutil decide
-        p.waitUntilExit()
-        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        // Can't tell (launch failed or hung): let diskutil decide.
+        guard let r = try? ProcessRunner.run(executable: URL(fileURLWithPath: "/sbin/mount"), timeout: 15),
+              !r.timedOut else { return true }
+        let text = r.stdoutString
         let resolved = URL(fileURLWithPath: mountpoint).resolvingSymlinksInPath().path
         return text.split(separator: "\n").contains { line in
             line.contains(" on \(mountpoint) (") || line.contains(" on \(resolved) (")
@@ -331,18 +306,9 @@ public class Mounter {
     }
 
     private func run(_ executable: String, args: [String], failure: (String, Int32) -> MountError) throws {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: executable)
-        p.arguments = args
-        let errPipe = Pipe()
-        p.standardError = errPipe
-        p.standardOutput = Pipe()
-        try p.run()
-        p.waitUntilExit()
-        if p.terminationStatus != 0 {
-            let data = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderr = String(data: data, encoding: .utf8) ?? ""
-            throw failure(stderr, p.terminationStatus)
+        let r = try ProcessRunner.run(executable: URL(fileURLWithPath: executable), arguments: args, timeout: 120)
+        if r.status != 0 {
+            throw failure(r.stderrString, r.status)
         }
     }
 }

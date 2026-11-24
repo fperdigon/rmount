@@ -68,32 +68,22 @@ public final class OAuthAuthorizer {
                 : "Enter the client secret together with the client ID (Google does not show it again; add a new secret in the console), or clear the client ID.")
         }
         if !id.isEmpty { args += [id, secret] }
-        let p = Process()
-        p.executableURL = binary
-        p.arguments = args
         var env = ProcessInfo.processInfo.environment
         if let scope, !scope.isEmpty { env["RCLONE_\(backend.uppercased())_SCOPE"] = scope }
-        p.environment = env
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = out
 
         lock.lock(); cancelled = false; timedOut = false; lock.unlock()
-        do { try p.run() } catch { throw OAuthError.launchFailed(error.localizedDescription) }
-        lock.lock(); process = p; lock.unlock()
         defer { lock.lock(); process = nil; lock.unlock() }
-
-        let timer = DispatchWorkItem { [weak self] in
-            guard let self, p.isRunning else { return }
-            self.lock.lock(); self.timedOut = true; self.lock.unlock()
-            p.terminate()
-        }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
-
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        timer.cancel()
-        let text = String(decoding: data, as: UTF8.self)
+        let result: ProcessResult
+        do {
+            result = try ProcessRunner.run(
+                executable: binary, arguments: args, environment: env, mergeStderr: true, timeout: timeout,
+                onStart: { [weak self] p in
+                    guard let self else { return }
+                    self.lock.lock(); self.process = p; self.lock.unlock()
+                })
+        } catch { throw OAuthError.launchFailed(error.localizedDescription) }
+        if result.timedOut { lock.lock(); timedOut = true; lock.unlock() }
+        let text = result.stdoutString
 
         if let token = Self.parseToken(from: text) { return token }
         lock.lock(); let wasCancelled = cancelled, wasTimedOut = timedOut; lock.unlock()
