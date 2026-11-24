@@ -26,6 +26,9 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 
 - A local process can no longer take the port rclone is about to serve on: the mount now checks that the listener is its own rclone and retries with fresh ports if rclone could not bind.
+### Security
+
+- The bundled rclone is now a pinned version (v1.76.0) whose SHA-256 is checked at build time; the build fails on a mismatch.
 
 ## [0.2.0] — 2026-11-22
 
