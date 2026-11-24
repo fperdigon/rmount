@@ -81,6 +81,11 @@ final class MenuBarController {
                 mountToggle.target = self
                 mountToggle.representedObject = session.id
                 submenu.addItem(mountToggle)
+                let refresh = NSMenuItem(title: "Refresh", action: #selector(refreshListings(_:)), keyEquivalent: "")
+                refresh.target = self
+                refresh.representedObject = session.id
+                refresh.isEnabled = isMounted(session)
+                submenu.addItem(refresh)
                 let transfers = NSMenuItem(title: "Transfers…", action: #selector(showTransfers(_:)), keyEquivalent: "")
                 transfers.target = self
                 transfers.representedObject = session.id
@@ -157,6 +162,14 @@ final class MenuBarController {
         case .failed: dot = "✕"
         }
         return "\(dot) \(session.remote.name)"
+    }
+
+    @objc private func refreshListings(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        Task { @MainActor in
+            // Best effort: a failed refresh only means the listing updates when its cache expires.
+            try? await manager.refreshListings(remoteID: id)
+        }
     }
 
     @objc private func toggleMount(_ sender: NSMenuItem) {

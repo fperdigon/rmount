@@ -12,6 +12,9 @@ public final class SessionManager: ObservableObject {
     private let controlClient: (RcloneProcess.Spawned) -> RcloneControlClient
     private let finderProgressPublisher: FinderProgressPublisher
     private let finderBadgeTracker: FinderBadgeTracker
+    private let focusRefresher: FocusFolderRefresher
+    private var rcClients: [UUID: RcloneControlClient] = [:]
+    private var focusPreferenceCancellable: AnyCancellable?
     private let preferences: UserPreferences
     private var finderProgressPreferenceCancellable: AnyCancellable?
     private var finderBadgesPreferenceCancellable: AnyCancellable?
@@ -39,6 +42,7 @@ public final class SessionManager: ObservableObject {
         preferences: UserPreferences = UserPreferences(),
         finderProgressFactory: FinderProgressFactory? = nil,
         finderBadgeTracker: FinderBadgeTracker? = nil,
+        focusFolderRefresher: FocusFolderRefresher? = nil,
         controlClient: @escaping (RcloneProcess.Spawned) -> RcloneControlClient = {
             URLSessionRcloneControlClient(port: $0.rcPort, user: $0.rcUser, password: $0.rcPassword)
         }
@@ -55,6 +59,17 @@ public final class SessionManager: ObservableObject {
             factory: finderProgressFactory, isEnabled: preferences.showFinderUploadProgress)
         self.finderBadgeTracker = finderBadgeTracker ?? FinderBadgeTracker(isEnabled: preferences.showFinderBadges)
         self.finderBadgeTracker.isEnabled = preferences.showFinderBadges
+        self.focusRefresher = focusFolderRefresher ?? FocusFolderRefresher(isEnabled: preferences.keepOpenFoldersFresh)
+        self.focusRefresher.isEnabled = preferences.keepOpenFoldersFresh
+        focusPreferenceCancellable = NotificationCenter.default
+            .publisher(for: UserPreferences.keepOpenFoldersFreshDidChange)
+            .sink { [weak self] _ in
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated { self?.updateFocusPreference() }
+                } else {
+                    Task { @MainActor [weak self] in self?.updateFocusPreference() }
+                }
+            }
         finderBadgesPreferenceCancellable = NotificationCenter.default
             .publisher(for: UserPreferences.showFinderBadgesDidChange)
             .sink { [weak self] _ in
@@ -74,6 +89,10 @@ public final class SessionManager: ObservableObject {
                 }
             }
         try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+    }
+
+    private func updateFocusPreference() {
+        focusRefresher.isEnabled = preferences.keepOpenFoldersFresh
     }
 
     private func updateFinderProgressPreference() {
@@ -107,7 +126,11 @@ public final class SessionManager: ObservableObject {
 
     func startUploadMonitor(remoteID: UUID, client: RcloneControlClient) {
         stopUploadMonitor(remoteID: remoteID)
+        rcClients[remoteID] = client
         if let session = sessions.first(where: { $0.id == remoteID }) {
+            if let mountpoint = session.mountpoint {
+                focusRefresher.register(remoteID: remoteID, mountpoint: mountpoint, client: client)
+            }
             finderBadgeTracker.sync(remoteID: remoteID, remoteName: session.remote.name,
                                     mountpoint: session.mountpoint, status: UploadStatus())
         }
@@ -127,6 +150,18 @@ public final class SessionManager: ObservableObject {
         }
     }
 
+    public enum RefreshError: LocalizedError, Equatable {
+        case notMounted
+        public var errorDescription: String? { "The remote is not mounted." }
+    }
+
+    /// Drops rclone's whole directory cache for a mounted remote (`vfs/forget`); folders are
+    /// listed again from the server the next time they are opened.
+    public func refreshListings(remoteID: UUID) async throws {
+        guard let client = rcClients[remoteID] else { throw RefreshError.notMounted }
+        try await client.vfsForgetAll()
+    }
+
     public func refreshUploadStatus(remoteID: UUID? = nil) async {
         for id in Array(uploadMonitors.keys) where remoteID == nil || id == remoteID {
             // Use the same serialized snapshot as background polling, including its
@@ -141,6 +176,8 @@ public final class SessionManager: ObservableObject {
         uploadGenerations[remoteID] = nil
         uploadMonitors.removeValue(forKey: remoteID)?.stop()
         uploadStatus[remoteID] = nil
+        rcClients[remoteID] = nil
+        focusRefresher.unregister(remoteID: remoteID)
         finderProgressPublisher.clear(remoteID: remoteID)
         finderBadgeTracker.clear(remoteID: remoteID)
     }
@@ -741,6 +778,7 @@ public final class SessionManager: ObservableObject {
         // republish Finder progress while the app is quitting.
         for remoteID in Array(uploadMonitors.keys) { stopUploadMonitor(remoteID: remoteID) }
         finderProgressPublisher.clearAll()
+        focusRefresher.stop()
         finderBadgeTracker.clearAll()
         for session in sessions {
             if case .mounted = session.status {

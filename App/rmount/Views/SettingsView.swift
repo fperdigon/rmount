@@ -123,6 +123,7 @@ private struct GeneralPane: View {
     @State private var defaultProtocol: MountProtocol
     @State private var showFinderUploadProgress: Bool
     @State private var showFinderBadges: Bool
+    @State private var keepOpenFoldersFresh: Bool
 
     init(loginItemManager: LoginItemManager, prefs: UserPreferences, finderExtensionPrompt: FinderExtensionPromptController) {
         self.loginItemManager = loginItemManager
@@ -132,6 +133,7 @@ private struct GeneralPane: View {
         _defaultProtocol = State(initialValue: prefs.defaultProtocol)
         _showFinderUploadProgress = State(initialValue: prefs.showFinderUploadProgress)
         _showFinderBadges = State(initialValue: prefs.showFinderBadges)
+        _keepOpenFoldersFresh = State(initialValue: prefs.keepOpenFoldersFresh)
     }
 
     var body: some View {
@@ -184,6 +186,14 @@ private struct GeneralPane: View {
                         .toggleStyle(.checkbox)
                         .onChange(of: showFinderUploadProgress) { _, value in prefs.showFinderUploadProgress = value }
                     Text("Finder shows a small progress circle next to files that are still uploading. Visible in list view only.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Keep open Finder folders up to date", isOn: $keepOpenFoldersFresh)
+                        .toggleStyle(.checkbox)
+                        .onChange(of: keepOpenFoldersFresh) { _, value in prefs.keepOpenFoldersFresh = value }
+                    Text("Rechecks the folder you are viewing in Finder every 15 seconds. Needs the RMount Finder extension.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

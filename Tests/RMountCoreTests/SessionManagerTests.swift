@@ -57,6 +57,7 @@ final class SessionManagerTests: DebugTestCase {
     private func makeFixture(controlClient: RcloneControlClient? = nil,
                              finderProgressFactory: FinderProgressFactory? = nil,
                              finderBadgeTracker: FinderBadgeTracker? = nil,
+                             focusRefresher: FocusFolderRefresher? = nil,
                              preferences: UserPreferences? = nil) throws -> Fixture {
         try FakeRclone.requirePython()
         let dir = try makeTempDir()
@@ -70,6 +71,7 @@ final class SessionManagerTests: DebugTestCase {
             preferences: preferences ?? UserPreferences(),
             finderProgressFactory: finderProgressFactory ?? SessionFinderProgressFactory(),
             finderBadgeTracker: finderBadgeTracker ?? FinderBadgeTracker(writer: SessionFinderBadgeWriter()),
+            focusFolderRefresher: focusRefresher ?? FocusFolderRefresher(isEnabled: false, readFocus: { nil }),
             controlClient: { spawned in
                 controlClient ?? URLSessionRcloneControlClient(port: spawned.rcPort, user: spawned.rcUser, password: spawned.rcPassword)
             }
@@ -646,6 +648,10 @@ private actor SessionControlClient: RcloneControlClient {
     var stats = RcloneStats()
     var statsFail = false
     var waiting: CheckedContinuation<Void, Never>?
+    var refreshed: [String?] = []
+    var forgets = 0
+    func vfsRefresh(dir: String?) async throws { refreshed.append(dir) }
+    func vfsForgetAll() async throws { forgets += 1 }
     func vfsQueue() async throws -> VFSQueue {
         calls += 1
         let result = queue
@@ -1069,5 +1075,76 @@ extension SessionManagerTests {
         await refresh.value
         XCTAssertTrue(tracker.snapshot.roots.isEmpty)
         XCTAssertTrue(tracker.snapshot.items.isEmpty)
+    }
+}
+
+// MARK: - fresh listings (focus-folder refresh, "Refresh" menu item)
+
+private final class SessionFocusFile {
+    var directories: [String] = []
+    func read() -> Data? {
+        try? JSONEncoder().encode(FinderFocusSnapshot(directories: directories))
+    }
+}
+
+extension SessionManagerTests {
+    func testRefreshListingsForgetsTheDirectoryCacheOfAMountedRemote() async throws {
+        let f = try makeFixture()
+        let remote = makeRemote(backend: sftpBackend())
+        try f.manager.add(remote)
+        let thrown = await thrownError { try await f.manager.refreshListings(remoteID: remote.id) }
+        XCTAssertEqual(thrown as? SessionManager.RefreshError, .notMounted)
+        XCTAssertNotNil((thrown as? LocalizedError)?.errorDescription)
+        f.manager.sessions[0].mountpoint = "/Volumes/test"
+        let client = SessionControlClient()
+        f.manager.startUploadMonitor(remoteID: remote.id, client: client)
+        try await f.manager.refreshListings(remoteID: remote.id)
+        var forgets = await client.forgets
+        XCTAssertEqual(forgets, 1)
+        f.manager.shutdownAll()
+        let afterShutdown = await thrownError { try await f.manager.refreshListings(remoteID: remote.id) }
+        XCTAssertEqual(afterShutdown as? SessionManager.RefreshError, .notMounted)
+        forgets = await client.forgets
+        XCTAssertEqual(forgets, 1)
+    }
+
+    func testFocusedFolderIsRefreshedThroughTheMountedRemotesClient() async throws {
+        let focus = SessionFocusFile()
+        var timing = FocusFolderRefresher.Timing()
+        timing.poll = 3600
+        let refresher = FocusFolderRefresher(timing: timing, isEnabled: true, readFocus: { focus.read() })
+        let f = try makeFixture(focusRefresher: refresher, preferences: finderPreferences())
+        let remote = makeRemote(backend: sftpBackend())
+        try f.manager.add(remote)
+        f.manager.sessions[0].mountpoint = "/Volumes/test"
+        focus.directories = ["/Volumes/test/Reports 2024", "/Volumes/other/x"]
+        let client = SessionControlClient()
+        f.manager.startUploadMonitor(remoteID: remote.id, client: client)
+        try await waitForUploads { await client.refreshed == ["Reports 2024"] }
+        f.manager.shutdownAll()     // stops focus refreshing
+        focus.directories = ["/Volumes/test/Later"]
+        await refresher.poll().value
+        let refreshed = await client.refreshed
+        XCTAssertEqual(refreshed, ["Reports 2024"])
+    }
+
+    func testKeepOpenFoldersFreshPreferenceTogglesTheRefresher() async throws {
+        let refresher = FocusFolderRefresher(isEnabled: true, readFocus: { nil })
+        let preferences = finderPreferences()
+        _ = try makeFixture(focusRefresher: refresher, preferences: preferences)
+        XCTAssertTrue(refresher.isEnabled)
+        preferences.keepOpenFoldersFresh = false
+        XCTAssertFalse(refresher.isEnabled)
+        await Task.detached { preferences.keepOpenFoldersFresh = true }.value
+        try await waitForUploads { refresher.isEnabled }
+        refresher.stop()
+    }
+
+    func testKeepOpenFoldersFreshDisabledAtInitialization() throws {
+        let preferences = finderPreferences()
+        preferences.keepOpenFoldersFresh = false
+        let refresher = FocusFolderRefresher(isEnabled: true, readFocus: { nil })
+        _ = try makeFixture(focusRefresher: refresher, preferences: preferences)
+        XCTAssertFalse(refresher.isEnabled)
     }
 }

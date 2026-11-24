@@ -13,7 +13,7 @@ public enum UpdateMode: String, Codable, CaseIterable, Equatable {
     public var summary: String {
         switch self {
         case .energySaver:
-            return "Checks the server for changes less often, so rclone and your Mac use less energy. Changes made on the server can take a few minutes to appear. Changes you make through the mount show up at once."
+            return "Checks the server for changes less often, so rclone and your Mac use less energy. Changes made on the server can take about a minute to appear. Changes you make through the mount show up at once."
         case .responsive:
             return "Checks the server every few seconds so changes appear quickly, at the cost of more CPU and battery."
         }

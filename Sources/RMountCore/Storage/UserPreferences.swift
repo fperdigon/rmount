@@ -8,6 +8,8 @@ public final class UserPreferences {
 
     public static let showFinderBadgesDidChange = Notification.Name("rmount.showFinderBadgesDidChange")
 
+    public static let keepOpenFoldersFreshDidChange = Notification.Name("rmount.keepOpenFoldersFreshDidChange")
+
     /// `legacyDomains` are the preference domains of the old bundle ids (`ai.macsh`). Values the
     /// user set there, under the old `macsh.*` key names, are copied once to the `rmount.*` keys;
     /// the old values stay where they are, so an older version keeps working.
@@ -120,6 +122,18 @@ public final class UserPreferences {
             defaults.set(newValue, forKey: Self.showFinderBadgesKey)
             if changed {
                 NotificationCenter.default.post(name: Self.showFinderBadgesDidChange, object: self)
+            }
+        }
+    }
+
+    /// Recheck the folders open in Finder every few seconds (needs the Finder extension). On by default.
+    public var keepOpenFoldersFresh: Bool {
+        get { defaults.object(forKey: Self.key("keepOpenFoldersFresh")) as? Bool ?? true }
+        set {
+            let changed = newValue != keepOpenFoldersFresh
+            defaults.set(newValue, forKey: Self.key("keepOpenFoldersFresh"))
+            if changed {
+                NotificationCenter.default.post(name: Self.keepOpenFoldersFreshDidChange, object: self)
             }
         }
     }

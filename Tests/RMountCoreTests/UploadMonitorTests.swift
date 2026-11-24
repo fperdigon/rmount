@@ -117,6 +117,48 @@ final class UploadMonitorTests: DebugTestCase {
         XCTAssertTrue(queue.status.hasPending)
     }
 
+    func testClientPostsVFSRefreshAndForgetWithJSONBody() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ControlURLProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel(); ControlURLProtocol.handler = nil }
+        var seen: [(String, String)] = []
+        ControlURLProtocol.handler = { request in
+            var body = Data()
+            if let stream = request.httpBodyStream {
+                stream.open()
+                var buffer = [UInt8](repeating: 0, count: 1024)
+                while stream.hasBytesAvailable {
+                    let n = stream.read(&buffer, maxLength: buffer.count)
+                    if n <= 0 { break }
+                    body.append(buffer, count: n)
+                }
+                stream.close()
+            }
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Basic " + Data("u:p".utf8).base64EncodedString())
+            seen.append((request.url!.absoluteString, String(decoding: body, as: UTF8.self)))
+            return (200, Data("{}".utf8))
+        }
+        let client = URLSessionRcloneControlClient(port: 43210, user: "u", password: "p", session: session)
+        try await client.vfsRefresh(dir: "My Docs/ñ")
+        try await client.vfsRefresh(dir: nil)
+        try await client.vfsForgetAll()
+        XCTAssertEqual(seen.map(\.0), ["http://127.0.0.1:43210/vfs/refresh", "http://127.0.0.1:43210/vfs/refresh", "http://127.0.0.1:43210/vfs/forget"])
+        XCTAssertEqual(seen.map(\.1), [#"{"dir":"My Docs\/ñ"}"#, "{}", "{}"])
+        ControlURLProtocol.handler = { _ in (500, Data()) }
+        do { try await client.vfsForgetAll(); XCTFail("Expected rejected response") }
+        catch { XCTAssertEqual((error as? URLError)?.code, .badServerResponse) }
+    }
+
+    func testClientsWithoutRefreshSupportThrow() async {
+        do { try await FakeControlClient().vfsRefresh(dir: nil); XCTFail("Expected unsupported") }
+        catch { XCTAssertEqual((error as? URLError)?.code, .unsupportedURL) }
+        do { try await FakeControlClient().vfsForgetAll(); XCTFail("Expected unsupported") }
+        catch { XCTAssertEqual((error as? URLError)?.code, .unsupportedURL) }
+    }
+
     func testClientPostsWithBasicAuthAndTimeout() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [ControlURLProtocol.self]

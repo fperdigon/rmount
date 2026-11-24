@@ -66,7 +66,9 @@ public struct TransferTuning: Codable, Equatable {
         readChunkSize = try c.decodeIfPresent(String.self, forKey: .readChunkSize) ?? ""
     }
 
-    /// Energy saving caches directories for 5 minutes; responsive keeps the original 10s.
+    /// Energy saving caches directories for 1 minute; responsive keeps the original 10s. The folder
+    /// open in Finder is rechecked separately (`FocusFolderRefresher`); a long cache only bought
+    /// staleness, since rclone's CPU is spent per NFS request, not per cache expiry.
     /// Polling backends use the same efficient defaults in both modes.
     /// WebDAV keeps conservative transfer settings. NFS issues many small reads, so
     /// it needs a read cache + read-ahead (measured 2.5 MB/s with `writes` vs ~17 MB/s).
@@ -87,7 +89,7 @@ public struct TransferTuning: Codable, Equatable {
             t.pollInterval = "30s"
             t.prefetchFolders = true
         } else if mode == .energySaver {
-            t.dirCacheTime = "5m"
+            t.dirCacheTime = "1m"
         }
         return t
     }

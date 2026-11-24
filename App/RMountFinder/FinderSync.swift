@@ -13,6 +13,9 @@ final class FinderSync: FIFinderSync {
     private var requestedPaths: Set<String> = []
     private var roots: Set<URL> = []
     private var lastError: String?
+    private var focusURL: URL?
+    private var observed: [String] = []
+    private var heartbeat: DispatchSourceTimer?
 
     override init() {
         super.init()
@@ -30,6 +33,8 @@ final class FinderSync: FIFinderSync {
             let support = try FileManager.default.url(for: .applicationSupportDirectory,
                 in: .userDomainMask, appropriateFor: nil, create: true)
             statusURL = support.appendingPathComponent("status.json")
+            focusURL = support.appendingPathComponent(FinderFocusSnapshot.fileName)
+            publishFocus()
             Trace.event("extension start status=\(statusURL!.path)")
         } catch {
             Trace.event("extension support-directory error=\(error.localizedDescription)")
@@ -117,6 +122,7 @@ final class FinderSync: FIFinderSync {
     override func beginObservingDirectory(at url: URL) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.observe(url.standardizedFileURL.path, begin: true)
             self.reload(reason: "beginObserving")
             Trace.event("extension beginObserving path=\(url.path)")
             let directory = url.standardizedFileURL.path
@@ -125,6 +131,35 @@ final class FinderSync: FIFinderSync {
                 self.apply(badge, to: URL(fileURLWithPath: path), reason: "beginObserving")
             }
         }
+    }
+
+    override func endObservingDirectory(at url: URL) {
+        DispatchQueue.main.async { [weak self] in
+            self?.observe(url.standardizedFileURL.path, begin: false)
+        }
+    }
+
+    /// Tell the app which folders Finder shows (focus.json, atomic). The app unsandboxed reads it.
+    private func observe(_ path: String, begin: Bool) {
+        observed.removeAll { $0 == path }
+        if begin { observed.append(path) }
+        publishFocus()
+        if observed.isEmpty { heartbeat?.cancel(); heartbeat = nil }
+        else if heartbeat == nil {
+            // Re-stamp so the app can tell a live extension from one that exited with folders open.
+            let source = DispatchSource.makeTimerSource(queue: .main)
+            source.schedule(deadline: .now() + 10, repeating: 10, leeway: .seconds(1))
+            source.setEventHandler { [weak self] in self?.publishFocus() }
+            heartbeat = source
+            source.resume()
+        }
+    }
+
+    private func publishFocus() {
+        guard let focusURL else { return }
+        let snapshot = FinderFocusSnapshot(directories: observed)
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        try? data.write(to: focusURL, options: .atomic)
     }
 
     override func requestBadgeIdentifier(for url: URL) {
@@ -139,6 +174,7 @@ final class FinderSync: FIFinderSync {
     deinit {
         watcher?.cancel()
         timer?.cancel()
+        heartbeat?.cancel()
     }
 }
 

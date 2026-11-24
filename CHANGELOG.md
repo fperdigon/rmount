@@ -6,6 +6,15 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The folder you are viewing in Finder is rechecked on the server when you open it and then every 15 seconds, so changes made elsewhere appear without waiting for the directory cache. It needs the RMount Finder extension and can be turned off in General settings (Keep open Finder folders up to date).
+- A Refresh item in each mounted remote's menu drops the cached folder listings, so every folder is read from the server again the next time it is opened.
+
+### Changed
+
+- The Energy saving directory cache is now 1 minute instead of 5 for remotes without change notifications. Remotes that saved their own performance settings keep them.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed

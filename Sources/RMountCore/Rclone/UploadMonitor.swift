@@ -75,10 +75,17 @@ public struct UploadStatus: Equatable {
 public protocol RcloneControlClient {
     func vfsQueue() async throws -> VFSQueue
     func coreStats() async throws -> RcloneStats
+    /// `vfs/refresh` for one directory, relative to the remote root (nil = the root itself).
+    /// Not recursive. rclone only accepts string values and takes the root when no `dir` is given.
+    func vfsRefresh(dir: String?) async throws
+    /// `vfs/forget` with no paths: drops the whole directory cache; listings are re-read lazily.
+    func vfsForgetAll() async throws
 }
 
 public extension RcloneControlClient {
     func coreStats() async throws -> RcloneStats { throw URLError(.unsupportedURL) }
+    func vfsRefresh(dir: String?) async throws { throw URLError(.unsupportedURL) }
+    func vfsForgetAll() async throws { throw URLError(.unsupportedURL) }
 }
 
 public struct URLSessionRcloneControlClient: RcloneControlClient {
@@ -103,6 +110,25 @@ public struct URLSessionRcloneControlClient: RcloneControlClient {
         var statsRequest = request
         statsRequest.url = request.url?.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("core/stats")
         return try await perform(statsRequest, as: RcloneStats.self)
+    }
+
+    public func vfsRefresh(dir: String?) async throws {
+        try await post("vfs/refresh", body: dir.map { ["dir": $0] } ?? [:])
+    }
+
+    public func vfsForgetAll() async throws {
+        try await post("vfs/forget", body: [:])
+    }
+
+    private func post(_ path: String, body: [String: String]) async throws {
+        var call = request
+        call.url = request.url?.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(path)
+        call.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        call.httpBody = try JSONEncoder().encode(body)
+        let (_, response) = try await session.data(for: call)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
     }
 
     private func perform<T: Decodable>(_ request: URLRequest, as type: T.Type) async throws -> T {

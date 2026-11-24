@@ -48,7 +48,7 @@ so nothing needs to be installed in the kernel.
 - **Google Drive**: browser sign-in; optional shared drive, root folder and your own OAuth client.
 - **Import from `rclone.conf`**: bring your existing remotes with you.
 - **Per-remote performance settings**: Energy saving / Responsive updates, cache mode, read-ahead, buffer size, write-back delay.
-- **Live updates**: changes on the server show up in seconds in Responsive mode, or within a few minutes in the default Energy saving mode.
+- **Live updates**: changes on the server show up in seconds in Responsive mode, or within about a minute in the default Energy saving mode. With the Finder extension on, the folder you are viewing is rechecked every 15 seconds, and each remote has a Refresh item in the menu.
 - **Upload status**: open Transfers from the menu to see per-file upload progress, bytes left, speed and estimated time remaining, with a warning before quitting, unmounting or updating.
 - **Finder upload progress**: a small progress circle in Finder's list view follows real uploads, including queued files; enabled by default in General settings.
 - **Finder badges**: file status badges in icon, list and column views, using the included Finder extension.

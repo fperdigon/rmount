@@ -110,6 +110,7 @@ targets:
       - path: RMountFinder
         excludes: [Info.plist, RMountFinder.entitlements]
       - path: ../Sources/RMountCore/Finder/FinderBadgeSnapshot.swift
+      - path: ../Sources/RMountCore/Finder/FinderFocusSnapshot.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.rmount.findersync
@@ -134,6 +135,7 @@ targets:
       - path: RMountFinder
         excludes: [Info.plist, RMountFinder.entitlements]
       - path: ../Sources/RMountCore/Finder/FinderBadgeSnapshot.swift
+      - path: ../Sources/RMountCore/Finder/FinderFocusSnapshot.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.rmount.lite.findersync
