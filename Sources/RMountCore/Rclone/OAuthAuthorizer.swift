@@ -34,7 +34,7 @@ public final class OAuthAuthorizer {
     }
 
     /// Returns the token JSON. `scope` reaches rclone as `RCLONE_<BACKEND>_SCOPE`; a custom
-    /// client ID and secret (both required together) are passed as rclone arguments.
+    /// client ID and secret (both required together) are passed as RCLONE_<BACKEND>_CLIENT_ID/_SECRET environment variables.
     public func authorize(
         binary: URL, backend: String, clientID: String? = nil, clientSecret: String? = nil,
         scope: String? = nil, timeout: TimeInterval = 300
@@ -56,7 +56,7 @@ public final class OAuthAuthorizer {
         binary: URL, backend: String, clientID: String?, clientSecret: String?,
         scope: String?, timeout: TimeInterval
     ) throws -> String {
-        var args = ["authorize", backend]
+        let args = ["authorize", backend]
         let id = (clientID ?? "").trimmingCharacters(in: .whitespaces)
         let secret = (clientSecret ?? "").trimmingCharacters(in: .whitespaces)
         // Half a pair used to fall back to rclone's shared client silently. That token only
@@ -67,12 +67,16 @@ public final class OAuthAuthorizer {
                 ? "A client secret was entered without a client ID. Enter both, or clear both to use rclone's shared client."
                 : "Enter the client secret together with the client ID (Google does not show it again; add a new secret in the console), or clear the client ID.")
         }
-        if !id.isEmpty { args += [id, secret] }
         let p = Process()
         p.executableURL = binary
         p.arguments = args
         var env = ProcessInfo.processInfo.environment
         if let scope, !scope.isEmpty { env["RCLONE_\(backend.uppercased())_SCOPE"] = scope }
+        // Client ID and secret go through the environment: positional arguments would show the secret to `ps`.
+        if !id.isEmpty {
+            env["RCLONE_\(backend.uppercased())_CLIENT_ID"] = id
+            env["RCLONE_\(backend.uppercased())_CLIENT_SECRET"] = secret
+        }
         p.environment = env
         let out = Pipe()
         p.standardOutput = out

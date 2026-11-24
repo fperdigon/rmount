@@ -29,7 +29,7 @@ public final class RcloneProcess {
     }
 
     /// Writes `configText` to a temp file, picks a free localhost port, generates random local creds,
-    /// and starts `rclone serve webdav <remoteName>:<remotePath> --addr 127.0.0.1:<port> --user <u> --pass <p>`.
+    /// and starts `rclone serve webdav <remoteName>:<remotePath> --addr 127.0.0.1:<port> `, credentials in RCLONE_USER/RCLONE_PASS.
     /// `passwordEnvValue` (if non-nil) is set as `passwordEnvName` for the child so rclone can use it for SFTP auth.
     public func spawnWebDAVServe(
         remoteName: String,
@@ -109,15 +109,17 @@ public final class RcloneProcess {
             "--addr", "127.0.0.1:\(port)",
             "--rc", "--rc-addr", "127.0.0.1:\(rcPort)",
         ]
-        if includeAuth {
-            args.append(contentsOf: ["--user", user, "--pass", password])
-        }
         args.append(contentsOf: extraServeArgs)
         process.arguments = args
         var env = ProcessInfo.processInfo.environment
         for (k, v) in envOverrides { env[k] = v }
         env["RCLONE_RC_USER"] = rcUser
         env["RCLONE_RC_PASS"] = rcPassword
+        // The serve credentials go through the environment, never argv (`ps` shows argv to other users).
+        if includeAuth {
+            env["RCLONE_USER"] = user
+            env["RCLONE_PASS"] = password
+        }
         process.environment = env
 
         LogArchive.rotate(current: logFile)
@@ -132,20 +134,40 @@ public final class RcloneProcess {
         return Spawned(process: process, port: port, user: user, password: password, rcPort: rcPort, rcUser: rcUser, rcPassword: rcPassword, configURL: configURL)
     }
 
-    /// Runs `rclone obscure <plaintext>` and returns the obscured form. rclone's env-var
-    /// override for a password expects the obscured form (the same one used in config files);
-    /// passing plaintext makes rclone fail with "input too short when revealing password".
+    /// Runs `rclone obscure -` with the plaintext on stdin (never argv, which other users can read
+    /// with `ps`) and returns the obscured form. rclone's env-var override for a password expects
+    /// the obscured form (the same one used in config files); passing plaintext makes rclone fail
+    /// with "input too short when revealing password". Throws if rclone fails or prints nothing.
+    /// rclone reads only the first line of stdin, so a secret containing a newline is truncated.
     public static func obscure(plaintext: String, binary: URL) throws -> String {
         let p = Process()
         p.executableURL = binary
-        p.arguments = ["obscure", plaintext]
-        let out = Pipe()
+        p.arguments = ["obscure", "-"]
+        let inPipe = Pipe(), out = Pipe(), err = Pipe()
+        p.standardInput = inPipe
         p.standardOutput = out
-        p.standardError = Pipe()
+        p.standardError = err
         try p.run()
-        p.waitUntilExit()
+        // A rclone that exits before reading stdin must not kill the app with SIGPIPE.
+        signal(SIGPIPE, SIG_IGN)
+        try? inPipe.fileHandleForWriting.write(contentsOf: Data((plaintext + "\n").utf8))
+        try? inPipe.fileHandleForWriting.close()
         let data = out.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let errData = err.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        let result = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard p.terminationStatus == 0, !result.isEmpty else {
+            throw ObscureError.failed(String(decoding: errData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return result
+    }
+
+    public enum ObscureError: Error, LocalizedError {
+        case failed(String)
+        public var errorDescription: String? {
+            if case .failed(let m) = self { return m.isEmpty ? "rclone obscure failed" : m }
+            return nil
+        }
     }
 
     public enum RevealError: Error, LocalizedError {
@@ -157,6 +179,8 @@ public final class RcloneProcess {
     }
 
     /// Runs `rclone reveal <obscured>` and returns the plaintext (the inverse of `obscure`).
+    /// `reveal` has no stdin form, so the obscured value (reversible with rclone's public key) is
+    /// briefly visible in argv; it is only used when importing an rclone.conf.
     public static func reveal(obscured: String, binary: URL) throws -> String {
         let p = Process()
         p.executableURL = binary

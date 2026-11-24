@@ -16,6 +16,15 @@ final class RcloneProcessTests: DebugTestCase {
         XCTAssertEqual(try RcloneProcess.obscure(plaintext: "secret", binary: fake.binary), "OBS-secret")
     }
 
+    func testObscureThrowsWhenRcloneFails() throws {
+        let (fake, _, dir) = try fixture()
+        try "1".write(to: dir.appendingPathComponent("obscure-fail.txt"), atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try RcloneProcess.obscure(plaintext: "secret", binary: fake.binary)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("obscure exploded"), "\(error)")
+        }
+        XCTAssertEqual(RcloneProcess.ObscureError.failed("").errorDescription, "rclone obscure failed")
+    }
+
     func testSpawnWebDAVServeBuildsArguments() throws {
         let (fake, runner, dir) = try fixture()
         let spawned = try runner.spawnWebDAVServe(
@@ -33,9 +42,12 @@ final class RcloneProcessTests: DebugTestCase {
         XCTAssertTrue(lines.contains("/vol"))
         XCTAssertTrue(lines.contains("--dir-cache-time"))
         XCTAssertTrue(lines.contains("--vfs-fast-fingerprint"))
-        XCTAssertTrue(lines.contains("--user"))
-        XCTAssertTrue(lines.contains(spawned.user))
-        XCTAssertTrue(lines.contains(spawned.password))
+        XCTAssertFalse(lines.contains("--user"))
+        XCTAssertFalse(lines.contains("--pass"))
+        XCTAssertFalse(lines.contains(spawned.user), "serve credentials must not be in argv")
+        XCTAssertFalse(lines.contains(spawned.password), "serve credentials must not be in argv")
+        XCTAssertTrue(lines.contains("ENV:RCLONE_USER=\(spawned.user)"))
+        XCTAssertTrue(lines.contains("ENV:RCLONE_PASS=\(spawned.password)"))
         XCTAssertTrue(lines.contains("ENV:RMOUNT_TEST_ENV=hello"))
         XCTAssertGreaterThan(spawned.port, 0)
         XCTAssertGreaterThan(spawned.rcPort, 0)

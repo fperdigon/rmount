@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- Passwords, the local WebDAV credentials and the OAuth client secret no longer appear in rclone's command line (visible to other local users in `ps`); they go through stdin and environment variables. A failing `rclone obscure` now errors instead of mounting with an empty password.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed

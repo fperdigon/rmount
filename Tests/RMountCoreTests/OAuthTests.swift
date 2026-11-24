@@ -58,7 +58,11 @@ final class OAuthAuthorizerTests: DebugTestCase {
             binary: rclone.binary, backend: "drive", clientID: "cid", clientSecret: "csecret", scope: "drive.readonly")
         XCTAssertTrue(token.contains(#""refresh_token":"RT""#))
         let lines = rclone.recordedLines()
-        XCTAssertEqual(Array(lines.prefix(4)), ["authorize", "drive", "cid", "csecret"])
+        XCTAssertEqual(lines.first, "authorize")
+        XCTAssertFalse(lines.contains("csecret"), "the client secret must not be in argv")
+        XCTAssertFalse(lines.contains("cid"))
+        XCTAssertTrue(lines.contains("ENV:RCLONE_DRIVE_CLIENT_ID=cid"))
+        XCTAssertTrue(lines.contains("ENV:RCLONE_DRIVE_CLIENT_SECRET=csecret"))
         XCTAssertTrue(lines.contains("ENV:RCLONE_DRIVE_SCOPE=drive.readonly"))
     }
 

@@ -22,7 +22,13 @@ struct FakeRclone {
                     f.write("[RMOUNT_TEST_DEBUG] time=%.6f pid=%d thread=main %s\\n" % (time.time(), os.getpid(), event))
         debug_log("fake-rclone start (arguments and environment redacted)")
         if args and args[0] == "obscure":
-            print("OBS-" + args[1])
+            if args[1] == "-":
+                if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "obscure-fail.txt")):
+                    sys.stderr.write("obscure exploded\\n")
+                    sys.exit(1)
+                print("OBS-" + sys.stdin.readline().rstrip("\\n"))
+            else:
+                print("OBS-" + args[1])
             sys.exit(0)
         if args and args[0] == "reveal":
             if args[1].startswith("OBS-"):
@@ -32,7 +38,7 @@ struct FakeRclone {
             sys.exit(1)
         here = os.path.dirname(os.path.abspath(__file__))
         if args and args[0] == "authorize":
-            lines = list(args) + ["ENV:RCLONE_DRIVE_SCOPE=" + os.environ.get("RCLONE_DRIVE_SCOPE", "")]
+            lines = list(args) + ["ENV:RCLONE_DRIVE_SCOPE=" + os.environ.get("RCLONE_DRIVE_SCOPE", ""), "ENV:RCLONE_DRIVE_CLIENT_ID=" + os.environ.get("RCLONE_DRIVE_CLIENT_ID", ""), "ENV:RCLONE_DRIVE_CLIENT_SECRET=" + os.environ.get("RCLONE_DRIVE_CLIENT_SECRET", "")]
             with open("\(argsFile.path)", "w") as f:
                 f.write("\\n".join(lines))
             mode = open(os.path.join(here, "authorize-mode.txt")).read().strip() if os.path.exists(os.path.join(here, "authorize-mode.txt")) else "ok"
@@ -54,7 +60,7 @@ struct FakeRclone {
             with open(args[args.index("--config") + 1], "a") as cf:
                 cf.write("token = " + open(refresh).read().strip() + "\\n")
         for k in sorted(os.environ):
-            if k.startswith("RCLONE_CONFIG_") or k == "RMOUNT_TEST_ENV":
+            if k.startswith("RCLONE_CONFIG_") or k == "RMOUNT_TEST_ENV" or k in ("RCLONE_USER", "RCLONE_PASS"):
                 lines.append("ENV:%s=%s" % (k, os.environ[k]))
         with open("\(argsFile.path)", "w") as f:
             f.write("\\n".join(lines))
