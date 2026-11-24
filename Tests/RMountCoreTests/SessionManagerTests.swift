@@ -924,8 +924,10 @@ final class SessionManagerTests: DebugTestCase {
         for log in ["couldn't fetch token: invalid_grant", "invalid_grant\n" + hint] {
             let f = try makeFixture()
             let r = makeRemote(backend: s3Backend(), autoMount: true)
-            try f.manager.add(r) // Missing credentials fail the mount; the log supplies rclone's reason.
-            try log.write(to: f.manager.logURL(for: r.id), atomically: true, encoding: .utf8)
+            try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+            // rclone starts, writes its reason to the log and exits (a stale log from an earlier
+            // run is deliberately ignored, so the failure has to come from a real spawn).
+            try log.write(to: f.dir.appendingPathComponent("serve-fail.txt"), atomically: true, encoding: .utf8)
             let failed = expectation(description: "sign-in failure with recovery hint")
             let retried = expectation(description: "no second attempt")
             retried.isInverted = true

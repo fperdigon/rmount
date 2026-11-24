@@ -77,6 +77,10 @@ struct FakeRclone {
             print("a.txt")
             print("sub/")
             sys.exit(0)
+        fail = os.path.join(here, "serve-fail.txt")
+        if "--addr" in args and os.path.exists(fail):
+            sys.stderr.write(open(fail).read() + "\\n")
+            sys.exit(1)
         once = os.path.join(here, "bind-fail-once.txt")
         if "--addr" in args and os.path.exists(once):
             os.remove(once)
