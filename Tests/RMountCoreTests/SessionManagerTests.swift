@@ -87,7 +87,8 @@ final class SessionManagerTests: DebugTestCase {
     private func makeFixture(controlClient: RcloneControlClient? = nil,
                              finderProgressFactory: FinderProgressFactory? = nil,
                              finderBadgeTracker: FinderBadgeTracker? = nil,
-                             preferences: UserPreferences? = nil) throws -> Fixture {
+                             preferences: UserPreferences? = nil,
+                             legacyCacheRoot: URL? = nil) throws -> Fixture {
         try FakeRclone.requirePython()
         let dir = try makeTempDir()
         let rclone = try FakeRclone.make(in: dir)
@@ -96,7 +97,9 @@ final class SessionManagerTests: DebugTestCase {
         let mounter = FakeMounter()
         let manager = SessionManager(
             store: store, keychain: keychain, mounter: mounter,
-            logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone.binary,
+            logsDir: dir.appendingPathComponent("logs"),
+            legacyCacheRoot: legacyCacheRoot ?? dir.appendingPathComponent("no-legacy-cache"),
+            rcloneBinary: rclone.binary,
             preferences: preferences ?? UserPreferences(),
             finderProgressFactory: finderProgressFactory ?? SessionFinderProgressFactory(),
             finderBadgeTracker: finderBadgeTracker ?? FinderBadgeTracker(writer: SessionFinderBadgeWriter()),
@@ -424,6 +427,107 @@ final class SessionManagerTests: DebugTestCase {
         let i = try XCTUnwrap(lines.firstIndex(of: "--bwlimit"))
         XCTAssertEqual(lines[i + 1], "10M:1M")
         try await f.manager.unmount(remoteID: r.id)
+    }
+
+    func testMountGivesEachRemoteItsOwnCacheDir() async throws {
+        let f = try makeFixture()
+        let a = makeRemote(backend: ftpBackend())
+        try f.manager.add(a, ftpSecrets: FTPSecrets(password: "pw"))
+        try await f.manager.mount(remoteID: a.id)
+        let lines = f.rclone.recordedLines()
+        let i = try XCTUnwrap(lines.firstIndex(of: "--cache-dir"))
+        XCTAssertEqual(lines[i + 1], f.manager.cacheDir(for: a.id).path)
+        XCTAssertEqual(f.manager.cacheDir(for: a.id).lastPathComponent, a.id.uuidString)
+        XCTAssertEqual(f.manager.cacheDir(for: a.id).deletingLastPathComponent().lastPathComponent, "cache")
+        XCTAssertNotEqual(f.manager.cacheDir(for: a.id), f.manager.cacheDir(for: UUID()))
+        try await f.manager.unmount(remoteID: a.id)
+    }
+
+    func testDeleteRemovesCacheDirWhenNothingPending() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: sftpBackend())
+        try f.manager.add(r, sftpSecrets: pw)
+        let dir = f.manager.cacheDir(for: r.id)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try await f.manager.delete(r.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
+    }
+
+    func testDeleteKeepsCacheDirWhenUploadsPending() async throws {
+        let client = SessionControlClient()
+        let f = try makeFixture(controlClient: client)
+        let r = makeRemote(backend: sftpBackend())
+        try f.manager.add(r, sftpSecrets: pw)
+        let dir = f.manager.cacheDir(for: r.id)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        f.manager.startUploadMonitor(remoteID: r.id, client: client)
+        try await waitForUploads { f.manager.uploadStatus[r.id]?.queuedCount == 1 }
+        try await f.manager.delete(r.id)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path))
+    }
+
+    private func legacyCache(withEntry: Bool) throws -> URL {
+        let root = try makeTempDir().appendingPathComponent("legacy")
+        let vfs = root.appendingPathComponent("vfs/r/pub", isDirectory: true)
+        try FileManager.default.createDirectory(at: vfs, withIntermediateDirectories: true)
+        if withEntry { try Data("dirty".utf8).write(to: vfs.appendingPathComponent("file.bin")) }
+        return root
+    }
+
+    func testLegacyCacheEntriesKeepOldCacheUntilQueueEmpty() async throws {
+        let legacy = try legacyCache(withEntry: true)
+        let client = SessionControlClient()
+        let f = try makeFixture(controlClient: client, legacyCacheRoot: legacy)
+        var r = makeRemote(backend: ftpBackend())
+        r.cacheMigrated = false
+        try f.manager.add(r, ftpSecrets: FTPSecrets(password: "pw"))
+        try await f.manager.mount(remoteID: r.id)
+        XCTAssertFalse(f.rclone.recordedLines().contains("--cache-dir"))
+        // Pending upload: stays on the legacy cache.
+        try await waitForUploads { f.manager.uploadStatus[r.id]?.queuedCount == 1 }
+        XCTAssertFalse(try f.store.load()[0].cacheMigrated)
+        // Queue drains: flagged for the next mount; the old cache is untouched.
+        await client.drain()
+        await f.manager.refreshUploadStatus()
+        try await waitForUploads { (try? f.store.load()[0].cacheMigrated) == true }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.appendingPathComponent("vfs/r/pub/file.bin").path))
+        try await f.manager.unmount(remoteID: r.id)
+        try await f.manager.mount(remoteID: r.id)
+        XCTAssertTrue(f.rclone.recordedLines().contains("--cache-dir"))
+        try await f.manager.unmount(remoteID: r.id)
+    }
+
+    func testNoLegacyEntriesUsesOwnCacheDirAtOnce() async throws {
+        let f = try makeFixture(legacyCacheRoot: try legacyCache(withEntry: false))
+        var r = makeRemote(backend: ftpBackend())
+        r.cacheMigrated = false
+        try f.manager.add(r, ftpSecrets: FTPSecrets(password: "pw"))
+        try await f.manager.mount(remoteID: r.id)
+        XCTAssertTrue(f.rclone.recordedLines().contains("--cache-dir"))
+        XCTAssertTrue(try f.store.load()[0].cacheMigrated)
+        try await f.manager.unmount(remoteID: r.id)
+    }
+
+    func testLegacyCacheMatchingRules() throws {
+        let root = try legacyCache(withEntry: false)
+        let fm = FileManager.default
+        XCTAssertFalse(LegacyVFSCache.hasEntries(root: root, remotePath: "/home/x"))
+        try fm.createDirectory(at: root.appendingPathComponent("vfsMeta/r{abc12}/home/x"), withIntermediateDirectories: true)
+        try Data("m".utf8).write(to: root.appendingPathComponent("vfsMeta/r{abc12}/home/x/a"))
+        XCTAssertTrue(LegacyVFSCache.hasEntries(root: root, remotePath: "/home/x"))
+        XCTAssertFalse(LegacyVFSCache.hasEntries(root: root, remotePath: "other/place"))
+        // Unusual characters cannot be matched safely: any content counts.
+        XCTAssertTrue(LegacyVFSCache.hasEntries(root: root, remotePath: "caf\u{e9}/x"))
+        XCTAssertFalse(LegacyVFSCache.hasEntries(root: root.appendingPathComponent("missing"), remotePath: ""))
+    }
+
+    func testRemoteDecodesMissingCacheMigratedAsFalse() throws {
+        let r = makeRemote(backend: sftpBackend())
+        var obj = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(r)) as? [String: Any])
+        XCTAssertEqual(obj["cacheMigrated"] as? Bool, true)
+        obj["cacheMigrated"] = nil
+        let old = try JSONDecoder().decode(Remote.self, from: JSONSerialization.data(withJSONObject: obj))
+        XCTAssertFalse(old.cacheMigrated)
     }
 
     func testMountWithoutOptionsHasNoReadOnlyOrBwlimit() async throws {
