@@ -25,7 +25,14 @@ public enum KeychainError: Error, Equatable {
     case decodingFailed
 }
 
-public final class KeychainService {
+/// The secret storage `SessionManager` needs; the Keychain in the app, an in-memory fake in tests.
+public protocol SecretStore: AnyObject, Sendable {
+    func set(remoteID: UUID, kind: SecretKind, value: String) throws
+    func get(remoteID: UUID, kind: SecretKind) throws -> String?
+    func delete(remoteID: UUID, kind: SecretKind) throws
+}
+
+public final class KeychainService: SecretStore, @unchecked Sendable {
     private let serviceName: String
     private let legacyServiceNames: [String]
 

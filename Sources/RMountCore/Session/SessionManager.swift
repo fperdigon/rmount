@@ -17,7 +17,7 @@ public final class SessionManager: ObservableObject {
     private var finderBadgesPreferenceCancellable: AnyCancellable?
 
     private let store: RemoteStore
-    private let keychain: KeychainService
+    private let keychain: SecretStore
     private let mounter: Mounter
     private let logsDir: URL
     private let rcloneBinary: URL
@@ -31,7 +31,7 @@ public final class SessionManager: ObservableObject {
 
     public init(
         store: RemoteStore,
-        keychain: KeychainService,
+        keychain: SecretStore,
         mounter: Mounter,
         logsDir: URL,
         rcloneBinary: URL,
@@ -358,6 +358,7 @@ public final class SessionManager: ObservableObject {
     /// Turns a remote and its secrets (from `draft` first, then the Keychain) into rclone
     /// config text, environment overrides and the path to serve. Shared by mount and
     /// "Test connection" so both exercise exactly the same inputs.
+    /// "Test connection" so both exercise exactly the same inputs.
     private func prepareRclone(for remote: Remote, draft: DraftSecrets?) async throws -> PreparedRclone {
         let rcloneBinary = self.rcloneBinary
         var ephemeralKeyURL: URL? = nil
@@ -365,23 +366,25 @@ public final class SessionManager: ObservableObject {
         var bundle = BackendSecrets()
         let remotePath: String
 
-        func stored(_ kind: SecretKind, draft value: String? = nil) throws -> String? {
+        // Keychain reads can block (unlock prompt), so they run off the main actor.
+        let keychain = self.keychain, remoteID = remote.id
+        func stored(_ kind: SecretKind, draft value: String? = nil) async throws -> String? {
             if let value, !value.isEmpty { return value }
-            return try keychain.get(remoteID: remote.id, kind: kind)
+            return try await Self.offMain { try keychain.get(remoteID: remoteID, kind: kind) }
         }
 
         do {
             switch remote.backend {
             case .sftp(let sftp):
                 let d = draft?.sftp
-                let password = try stored(.password, draft: d?.password)
+                let password = try await stored(.password, draft: d?.password)
                 var resolvedKeyPath: String? = nil
                 switch sftp.authKind {
                 case .password: break
                 case .keyFile:
-                    resolvedKeyPath = try stored(.privateKey, draft: d?.privateKeyPath)
+                    resolvedKeyPath = try await stored(.privateKey, draft: d?.privateKeyPath)
                 case .generatedKey:
-                    if let pem = try stored(.privateKey, draft: d?.privateKeyPath) {
+                    if let pem = try await stored(.privateKey, draft: d?.privateKeyPath) {
                         let url = FileManager.default.temporaryDirectory
                             .appendingPathComponent("rmount-key-\(remote.id.uuidString)")
                         try pem.write(to: url, atomically: true, encoding: .utf8)
@@ -393,7 +396,7 @@ public final class SessionManager: ObservableObject {
                 bundle.sftp = SFTPSecrets(
                     password: password,
                     privateKeyPath: resolvedKeyPath,
-                    keyPassphrase: try stored(.keyPassphrase, draft: d?.keyPassphrase)
+                    keyPassphrase: try await stored(.keyPassphrase, draft: d?.keyPassphrase)
                 )
                 if sftp.authKind == .keyFile, let pp = bundle.sftp?.keyPassphrase, !pp.isEmpty {
                     // Without this, passphrase-protected keys fail with
@@ -413,8 +416,8 @@ public final class SessionManager: ObservableObject {
                 remotePath = sftp.remotePath
 
             case .s3(let s3):
-                guard let access = try stored(.s3AccessKeyID, draft: draft?.s3?.accessKeyID),
-                      let secret = try stored(.s3SecretAccessKey, draft: draft?.s3?.secretAccessKey) else {
+                guard let access = try await stored(.s3AccessKeyID, draft: draft?.s3?.accessKeyID),
+                      let secret = try await stored(.s3SecretAccessKey, draft: draft?.s3?.secretAccessKey) else {
                     throw RcloneConfigError.missingS3Credentials
                 }
                 bundle.s3 = S3Secrets(accessKeyID: access, secretAccessKey: secret)
@@ -422,7 +425,7 @@ public final class SessionManager: ObservableObject {
                 remotePath = s3.prefix.isEmpty ? s3.bucket : "\(s3.bucket)/\(s3.prefix)"
 
             case .ftp(let ftp):
-                guard let password = try stored(.password, draft: draft?.ftp?.password) else {
+                guard let password = try await stored(.password, draft: draft?.ftp?.password) else {
                     throw RcloneConfigError.missingFTPPassword
                 }
                 bundle.ftp = FTPSecrets(password: password)
@@ -432,7 +435,7 @@ public final class SessionManager: ObservableObject {
 
             case .rclone(let cfg):
                 for opt in cfg.secretOptions {
-                    guard let value = try stored(.option(opt.name), draft: draft?.options[opt.name]), !value.isEmpty else {
+                    guard let value = try await stored(.option(opt.name), draft: draft?.options[opt.name]), !value.isEmpty else {
                         if opt.required { throw RcloneConfigError.missingSecret(opt.name) }
                         continue
                     }
@@ -567,33 +570,49 @@ public final class SessionManager: ObservableObject {
             let extraArgs = MountOptions.serveArgs(readOnly: remote.readOnly, bandwidthLimit: remote.bandwidthLimit)
             let runner = RcloneProcess(binary: rcloneBinary, logFile: logURL)
             let volname = mounter.volumeName(from: remote.name)
-            let spawned: RcloneProcess.Spawned
-            switch remote.mountProtocol {
-            case .webdav:
-                spawned = try runner.spawnWebDAVServe(
-                    remoteName: RcloneConfigBuilder.sectionName,
-                    remotePath: remotePath,
-                    configText: configText,
-                    baseurl: "/\(volname)",
-                    liveUpdates: remote.liveUpdates,
-                    tuning: tuning,
-                    envOverrides: envOverrides,
-                    extraArgs: extraArgs
-                )
-            case .nfs:
-                spawned = try runner.spawnNFSServe(
-                    remoteName: RcloneConfigBuilder.sectionName,
-                    remotePath: remotePath,
-                    configText: configText,
-                    liveUpdates: remote.liveUpdates,
-                    tuning: tuning,
-                    envOverrides: envOverrides,
-                    extraArgs: extraArgs
-                )
+            func spawnOnce() throws -> RcloneProcess.Spawned {
+                switch remote.mountProtocol {
+                case .webdav:
+                    return try runner.spawnWebDAVServe(
+                        remoteName: RcloneConfigBuilder.sectionName,
+                        remotePath: remotePath,
+                        configText: configText,
+                        baseurl: "/\(volname)",
+                        liveUpdates: remote.liveUpdates,
+                        tuning: tuning,
+                        envOverrides: envOverrides,
+                        extraArgs: extraArgs
+                    )
+                case .nfs:
+                    return try runner.spawnNFSServe(
+                        remoteName: RcloneConfigBuilder.sectionName,
+                        remotePath: remotePath,
+                        configText: configText,
+                        liveUpdates: remote.liveUpdates,
+                        tuning: tuning,
+                        envOverrides: envOverrides,
+                        extraArgs: extraArgs
+                    )
+                }
             }
-            spawnedProcess = spawned.process
-            spawnedConfig = spawned.configURL
-            try await waitForPort(spawned.port, process: spawned.process, timeout: portWaitTimeout)
+            // The free port is picked before rclone binds it, so another process can win the
+            // race. rclone then exits with "address already in use": retry with fresh ports.
+            var spawned = try spawnOnce()
+            var attempt = 1
+            while true {
+                spawnedProcess = spawned.process
+                spawnedConfig = spawned.configURL
+                do {
+                    try await waitForPort(spawned.port, process: spawned.process, timeout: portWaitTimeout)
+                    break
+                } catch {
+                    guard attempt < Self.maxSpawnAttempts, !spawned.process.isRunning,
+                          Self.isBindFailure(logFile: logURL) else { throw error }
+                    try? FileManager.default.removeItem(at: spawned.configURL.deletingLastPathComponent())
+                    attempt += 1
+                    spawned = try spawnOnce()
+                }
+            }
 
             let mountpoint: String
             switch remote.mountProtocol {
@@ -765,7 +784,12 @@ public final class SessionManager: ObservableObject {
     private func waitForPort(_ port: Int, process: Process, timeout: TimeInterval) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if Self.canConnect(port: port) { return }
+            if Self.canConnect(port: port) {
+                // Something listens; make sure it is our rclone and not a process that took the port first.
+                let pid = process.processIdentifier
+                let owners = try await Self.offMain { Self.listeningPIDs(port: port) }
+                if owners == nil || owners!.contains(pid) { return }
+            }
             if !process.isRunning {
                 throw NSError(domain: "rmount", code: 2, userInfo: [
                     NSLocalizedDescriptionKey: "rclone exited before it started listening (exit \(process.terminationStatus))"])
@@ -774,6 +798,30 @@ public final class SessionManager: ObservableObject {
         }
         throw NSError(domain: "rmount", code: 1, userInfo: [
             NSLocalizedDescriptionKey: "rclone serve did not open port \(port) within \(Int(timeout))s"])
+    }
+
+    nonisolated static let maxSpawnAttempts = 3
+
+    /// True when rclone's log says it could not bind its port.
+    nonisolated static func isBindFailure(logFile: URL) -> Bool {
+        guard let text = try? String(contentsOf: logFile, encoding: .utf8) else { return false }
+        return text.lowercased().contains("address already in use")
+    }
+
+    /// Pids listening on `127.0.0.1:port` (via `lsof`), or nil when that cannot be determined.
+    nonisolated static func listeningPIDs(port: Int) -> Set<Int32>? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        p.arguments = ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-t"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        // lsof exits 1 with no output when nothing matches; any other failure is "unknown".
+        guard p.terminationStatus == 0 || p.terminationStatus == 1 else { return nil }
+        return Set(String(decoding: data, as: UTF8.self).split(separator: "\n").compactMap { Int32($0) })
     }
 
     /// One non-blocking-in-practice TCP connect to 127.0.0.1 (refused or accepted at once).

@@ -71,6 +71,11 @@ struct FakeRclone {
             print("a.txt")
             print("sub/")
             sys.exit(0)
+        once = os.path.join(here, "bind-fail-once.txt")
+        if "--addr" in args and os.path.exists(once):
+            os.remove(once)
+            sys.stderr.write("Failed to start server: listen tcp 127.0.0.1:1: bind: address already in use\\n")
+            sys.exit(1)
         if "--addr" in args:
             host, port = args[args.index("--addr") + 1].rsplit(":", 1)
             s = socket.socket()
@@ -303,4 +308,14 @@ extension Process {
 final class NoopFinderBadgeStatusWriter: FinderBadgeStatusWriting {
     func write(_ snapshot: FinderBadgeSnapshot) {}
     func flush(_ snapshot: FinderBadgeSnapshot) {}
+}
+
+/// In-memory `SecretStore` so SessionManager tests do not touch the real Keychain.
+final class InMemorySecretStore: SecretStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [String: String] = [:]
+    private func key(_ id: UUID, _ kind: SecretKind) -> String { "\(id.uuidString):\(kind.rawValue)" }
+    func set(remoteID: UUID, kind: SecretKind, value: String) throws { lock.withLock { items[key(remoteID, kind)] = value } }
+    func get(remoteID: UUID, kind: SecretKind) throws -> String? { lock.withLock { items[key(remoteID, kind)] } }
+    func delete(remoteID: UUID, kind: SecretKind) throws { lock.withLock { _ = items.removeValue(forKey: key(remoteID, kind)) } }
 }

@@ -48,7 +48,7 @@ final class SessionManagerTests: DebugTestCase {
     private struct Fixture {
         let manager: SessionManager
         let mounter: FakeMounter
-        let keychain: KeychainService
+        let keychain: SecretStore
         let store: RemoteStore
         let rclone: FakeRclone
         let dir: URL
@@ -61,7 +61,7 @@ final class SessionManagerTests: DebugTestCase {
         try FakeRclone.requirePython()
         let dir = try makeTempDir()
         let rclone = try FakeRclone.make(in: dir)
-        let keychain = KeychainService(serviceName: "rmount.tests.\(UUID().uuidString)")
+        let keychain = InMemorySecretStore()
         let store = RemoteStore(directory: dir)
         let mounter = FakeMounter()
         let manager = SessionManager(
@@ -239,6 +239,44 @@ final class SessionManagerTests: DebugTestCase {
         XCTAssertEqual(f.mounter.unmounted, ["/Volumes/fake/my server"])
         proc.debugWaitUntilExit()
         XCTAssertFalse(proc.isRunning)
+    }
+
+    func testMountRetriesWithFreshPortWhenRcloneCannotBind() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(name: "racy", backend: sftpBackend())
+        try f.manager.add(r, sftpSecrets: pw)
+        try "1".write(to: f.dir.appendingPathComponent("bind-fail-once.txt"), atomically: true, encoding: .utf8)
+
+        try await f.manager.mount(remoteID: r.id)
+
+        let session = try XCTUnwrap(f.manager.sessions.first)
+        XCTAssertEqual(session.status, .mounted(at: "/Volumes/fake/racy"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.dir.appendingPathComponent("bind-fail-once.txt").path))
+        try await f.manager.unmount(remoteID: r.id)
+    }
+
+    func testIsBindFailureReadsLog() throws {
+        let dir = try makeTempDir()
+        let log = dir.appendingPathComponent("l.log")
+        XCTAssertFalse(SessionManager.isBindFailure(logFile: log))
+        try "listen tcp 127.0.0.1:5: bind: Address already in use\n".write(to: log, atomically: true, encoding: .utf8)
+        XCTAssertTrue(SessionManager.isBindFailure(logFile: log))
+        try "some other error".write(to: log, atomically: true, encoding: .utf8)
+        XCTAssertFalse(SessionManager.isBindFailure(logFile: log))
+    }
+
+    func testListeningPIDsReportsTheListener() throws {
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        defer { close(sock) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        _ = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+        XCTAssertEqual(listen(sock, 1), 0)
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(sock, $0, &len) } }
+        let port = Int(UInt16(bigEndian: addr.sin_port))
+        XCTAssertEqual(SessionManager.listeningPIDs(port: port), [getpid()])
     }
 
     func testMountS3PassesSecretViaEnvAndBuildsRemotePath() async throws {
