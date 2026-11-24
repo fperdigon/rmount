@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Deleting a mounted remote and quitting no longer freeze the menu bar while a volume unmounts: deleting unmounts in the background, quitting unmounts all remotes in parallel with a time limit, and a hung `diskutil` is killed after 30 seconds.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed

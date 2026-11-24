@@ -47,4 +47,25 @@ final class MounterTests: DebugTestCase {
             }
         }
     }
+
+    func testWaitWithDeadlineKillsAHungProcess() throws {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        p.arguments = ["30"]
+        try p.run()
+        let start = Date()
+        Mounter.waitWithDeadline(p, seconds: 0.3)
+        XCTAssertFalse(p.isRunning)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+    }
+
+    func testWaitWithDeadlineReturnsEarlyWhenProcessExits() throws {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try p.run()
+        let start = Date()
+        Mounter.waitWithDeadline(p, seconds: 10)
+        XCTAssertEqual(p.terminationStatus, 0)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+    }
 }

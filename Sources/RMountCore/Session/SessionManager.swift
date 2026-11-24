@@ -303,11 +303,12 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    public func delete(_ remoteID: UUID) throws {
+    /// Unmounts (off the main actor, so the menu bar stays responsive), then removes the remote.
+    public func delete(_ remoteID: UUID) async throws {
         retryTasks[remoteID]?.cancel()
         retryTasks[remoteID] = nil
         if let session = sessions.first(where: { $0.id == remoteID }), case .mounted = session.status {
-            try? unmountBlocking(remoteID: remoteID)
+            try? await unmount(remoteID: remoteID)
         }
         try? keychain.delete(remoteID: remoteID, kind: .password)
         try? keychain.delete(remoteID: remoteID, kind: .keyPassphrase)
@@ -734,7 +735,9 @@ public final class SessionManager: ObservableObject {
         if session.remote.autoMount { scheduleMount(remoteID: session.id, attempt: 0) }
     }
 
-    public func shutdownAll() {
+    /// Unmounts every mounted remote at app quit. The unmounts run in parallel and the whole
+    /// call is bounded by `deadline` seconds, so one hung `diskutil` cannot stall quitting.
+    public func shutdownAll(deadline: TimeInterval = 8) {
         for (_, task) in retryTasks { task.cancel() }
         retryTasks.removeAll()
         // Invalidate every callback before unmounting: even a busy volume must not
@@ -742,10 +745,28 @@ public final class SessionManager: ObservableObject {
         for remoteID in Array(uploadMonitors.keys) { stopUploadMonitor(remoteID: remoteID) }
         finderProgressPublisher.clearAll()
         finderBadgeTracker.clearAll()
-        for session in sessions {
-            if case .mounted = session.status {
-                try? unmountBlocking(remoteID: session.id)
+        let targets = sessions.compactMap { s -> (RemoteSession, String)? in
+            if case .mounted = s.status, let mp = s.mountpoint { return (s, mp) }
+            return nil
+        }
+        let mounter = self.mounter
+        let group = DispatchGroup()
+        let failed = NSLock()
+        var failedIDs = Set<UUID>()
+        for (session, mp) in targets {
+            let id = session.id
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                do { try mounter.unmount(mountpoint: mp) }
+                catch { failed.lock(); failedIDs.insert(id); failed.unlock() }
+                group.leave()
             }
+        }
+        _ = group.wait(timeout: .now() + deadline)
+        failed.lock(); let failedNow = failedIDs; failed.unlock()
+        // A failed (busy) unmount keeps its session as it was; a hung one is abandoned.
+        for (session, _) in targets where !failedNow.contains(session.id) {
+            finishUnmount(session)
         }
     }
 

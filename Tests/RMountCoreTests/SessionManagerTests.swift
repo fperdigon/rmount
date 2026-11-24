@@ -34,7 +34,13 @@ private final class FakeMounter: Mounter {
 
     override func reconcileLeftoverNFSMounts() -> [String] { [] }
 
-    override func unmount(mountpoint: String) throws { lock.withLock { _unmounted.append(mountpoint) } }
+    /// Seconds each `unmount` blocks (simulates a slow or hung diskutil).
+    var unmountDelay: TimeInterval = 0
+
+    override func unmount(mountpoint: String) throws {
+        if unmountDelay > 0 { Thread.sleep(forTimeInterval: unmountDelay) }
+        lock.withLock { _unmounted.append(mountpoint) }
+    }
 
     @discardableResult
     override func reconcileStaleMount(volumeName: String) -> Bool {
@@ -78,7 +84,7 @@ final class SessionManagerTests: DebugTestCase {
             TestDebug.log("teardown main-actor body start")
             defer { TestDebug.log("teardown main-actor body finish") }
             manager.shutdownAll()
-            for s in manager.sessions { try? manager.delete(s.id) }
+            for s in manager.sessions { try? await manager.delete(s.id) }
             try? FileManager.default.removeItem(at: dir)
         }
         return Fixture(manager: manager, mounter: mounter, keychain: keychain, store: store, rclone: rclone, dir: dir)
@@ -182,11 +188,11 @@ final class SessionManagerTests: DebugTestCase {
         XCTAssertThrowsError(try f.manager.update(makeRemote(backend: sftpBackend())))
     }
 
-    func testDeleteRemovesRemoteAndSecrets() throws {
+    func testDeleteRemovesRemoteAndSecrets() async throws {
         let f = try makeFixture()
         let r = makeRemote(backend: sftpBackend())
         try f.manager.add(r, sftpSecrets: pw)
-        try f.manager.delete(r.id)
+        try await f.manager.delete(r.id)
         XCTAssertTrue(f.manager.sessions.isEmpty)
         XCTAssertTrue(try f.store.load().isEmpty)
         XCTAssertNil(try f.keychain.get(remoteID: r.id, kind: .password))
@@ -306,14 +312,14 @@ final class SessionManagerTests: DebugTestCase {
         XCTAssertEqual(try f.keychain.get(remoteID: r.id, kind: .option("pass")), "newpw")
     }
 
-    func testDeleteRemovesGenericAndS3Secrets() throws {
+    func testDeleteRemovesGenericAndS3Secrets() async throws {
         let f = try makeFixture()
         let w = makeRemote(backend: webdavBackend())
         let s3 = makeRemote(backend: s3Backend())
         try f.manager.add(w, optionSecrets: ["pass": "pw"])
         try f.manager.add(s3, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
-        try f.manager.delete(w.id)
-        try f.manager.delete(s3.id)
+        try await f.manager.delete(w.id)
+        try await f.manager.delete(s3.id)
         XCTAssertNil(try f.keychain.get(remoteID: w.id, kind: .option("pass")))
         XCTAssertNil(try f.keychain.get(remoteID: s3.id, kind: .s3AccessKeyID))
         XCTAssertNil(try f.keychain.get(remoteID: s3.id, kind: .s3SecretAccessKey))
@@ -522,13 +528,74 @@ final class SessionManagerTests: DebugTestCase {
         XCTAssertEqual(f.mounter.unmounted.count, 1)
     }
 
+    func testShutdownAllReturnsWithinDeadlineWhenUnmountHangs() async throws {
+        let f = try makeFixture()
+        let a = makeRemote(backend: s3Backend())
+        let b = makeRemote(backend: s3Backend())
+        for r in [a, b] {
+            try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+            try await f.manager.mount(remoteID: r.id)
+        }
+        f.mounter.unmountDelay = 4
+
+        let start = Date()
+        f.manager.shutdownAll(deadline: 0.5)
+
+        // Parallel and bounded: two 4 s unmounts must not take 8 s, nor even 4 s.
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2.5)
+    }
+
+    func testShutdownAllUnmountsInParallel() async throws {
+        let f = try makeFixture()
+        for _ in 0..<3 {
+            let r = makeRemote(backend: s3Backend())
+            try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+            try await f.manager.mount(remoteID: r.id)
+        }
+        f.mounter.unmountDelay = 0.6
+
+        let start = Date()
+        f.manager.shutdownAll(deadline: 5)
+
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1.5)
+        XCTAssertEqual(f.mounter.unmounted.count, 3)
+        XCTAssertTrue(f.manager.sessions.allSatisfy { $0.status == .idle })
+    }
+
+    func testDeleteDoesNotBlockTheMainActor() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        try await f.manager.mount(remoteID: r.id)
+        f.mounter.unmountDelay = 1.0
+
+        var maxGap: TimeInterval = 0
+        var last = Date()
+        var running = true
+        let heartbeat = Task { @MainActor in
+            while running {
+                let now = Date()
+                maxGap = max(maxGap, now.timeIntervalSince(last))
+                last = now
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+        try await f.manager.delete(r.id)
+        running = false
+        await heartbeat.value
+
+        XCTAssertLessThan(maxGap, 0.5, "main actor was blocked while deleting")
+        XCTAssertEqual(f.mounter.unmounted.count, 1)
+        XCTAssertTrue(f.manager.sessions.isEmpty)
+    }
+
     func testDeleteMountedRemoteUnmountsFirst() async throws {
         let f = try makeFixture()
         let r = makeRemote(backend: s3Backend())
         try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
         try await f.manager.mount(remoteID: r.id)
 
-        try f.manager.delete(r.id)
+        try await f.manager.delete(r.id)
 
         XCTAssertEqual(f.mounter.unmounted.count, 1)
         XCTAssertTrue(f.manager.sessions.isEmpty)
@@ -808,7 +875,7 @@ extension SessionManagerTests {
         await client.delayNext()
         let refresh = Task { await f.manager.refreshUploadStatus(remoteID: remote.id) }
         try await waitForUploads { await client.waiting != nil }
-        try f.manager.delete(remote.id)
+        try await f.manager.delete(remote.id)
         await client.release()
         await refresh.value
         XCTAssertNil(f.manager.uploadStatus[remote.id])
@@ -994,7 +1061,7 @@ extension SessionManagerTests {
         try await f.manager.unmount(remoteID: remotes[0].id)
         XCTAssertEqual(tracker.snapshot.roots, [f.dir.appendingPathComponent("two").path])
         XCTAssertEqual(tracker.snapshot.items.count, 1)
-        try f.manager.delete(remotes[1].id)
+        try await f.manager.delete(remotes[1].id)
         XCTAssertTrue(tracker.snapshot.roots.isEmpty)
         XCTAssertTrue(tracker.snapshot.items.isEmpty)
     }

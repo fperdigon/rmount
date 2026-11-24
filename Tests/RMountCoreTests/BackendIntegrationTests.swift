@@ -226,7 +226,7 @@ final class BackendIntegrationTests: DebugTestCase {
             TestDebug.log("teardown main-actor body start")
             defer { TestDebug.log("teardown main-actor body finish") }
             manager.shutdownAll()
-            for session in manager.sessions { try? manager.delete(session.id) }
+            for session in manager.sessions { try? await manager.delete(session.id) }
             try? FileManager.default.removeItem(at: dir)
         }
 
