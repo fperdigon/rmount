@@ -1,0 +1,75 @@
+name: CI retry
+
+# Reruns CI jobs that GitHub never gave a runner (the macOS arm64 pool is often exhausted: the job ends
+# `cancelled` with zero steps). A job with a failed step is NEVER retried; see scripts/ci-retry-decision.py.
+#
+# NOTE: workflow_run workflows run from the default branch's copy of this file, so this takes effect only
+# after it is merged to main.
+#
+# Safety: no checkout. The decision script is read from the default branch through the API (never from the
+# PR). Only numeric ids, the head sha and the branch name reach the shell, always through `env:` and quoted.
+# Limitation: a run superseded by a newer commit is skipped only when the branch lookup works; if it fails we
+# rely on the zero-steps rule alone.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: ci-retry-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    if: github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+    steps:
+      - name: Decide and rerun
+        run: |
+          set -euo pipefail
+          case "$RUN_ID$RUN_ATTEMPT" in *[!0-9]*|"") echo "bad ids"; exit 1 ;; esac
+
+          # True while this run is still the newest CI run of its branch (a superseded run was cancelled on purpose).
+          is_latest() {
+            local latest
+            latest=$(gh run list --workflow CI --branch "$HEAD_BRANCH" --limit 1 --json headSha --jq '.[0].headSha' || true)
+            [ -z "$latest" ] || [ "$latest" = "$HEAD_SHA" ]
+          }
+
+          decide() {
+            gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --paginate > jobs.json
+            python3 scripts-ci-retry-decision.py --attempt "$RUN_ATTEMPT" < jobs.json
+          }
+
+          gh api "repos/$GH_REPO/contents/scripts/ci-retry-decision.py" -H "Accept: application/vnd.github.raw" > scripts-ci-retry-decision.py
+
+          if ! is_latest; then echo "Superseded by a newer run; skipping."; exit 0; fi
+          result=$(decide)
+          echo "$result"
+          case "$result" in
+            retry:*)
+              sleep 600   # let the runner outage ease
+              if ! is_latest; then echo "Superseded while waiting; skipping."; exit 0; fi
+              gh run rerun "$RUN_ID" --failed
+              ;;
+            exhausted:*)
+              case "$PR_NUMBER" in
+                ""|*[!0-9]*) echo "No associated PR; nothing to comment on." ;;
+                *) gh pr comment "$PR_NUMBER" --body "CI jobs never got a GitHub-hosted runner and automatic retries are exhausted. Rerun the failed jobs by hand once runners are available." ;;
+              esac
+              ;;
+          esac
