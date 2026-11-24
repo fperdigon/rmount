@@ -635,7 +635,7 @@ final class SessionManagerTests: DebugTestCase {
         let proc = try XCTUnwrap(f.manager.mountAttempts[r.id]?.process)
         XCTAssertTrue(f.manager.isMountInFlight(remoteID: r.id))
 
-        try f.manager.delete(r.id)
+        try await f.manager.delete(r.id)
         f.mounter.releaseMount()
         try await task.value
 
