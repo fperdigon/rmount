@@ -50,7 +50,9 @@ fi
     echo
     printf '%s\n' "$prev_history"
   fi
-} | head -c 100000 > notes.md
+} > notes.md
+# A file, not `| head -c`: the early exit would SIGPIPE the producer (status 141 under pipefail).
+"$(dirname "$0")/truncate-notes.sh" notes.md 100000
 
 for f in dist/*.dmg; do
   mv "$f" "${f%.dmg}-nightly-${day}-${short}.dmg"
