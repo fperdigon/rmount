@@ -20,6 +20,8 @@ public final class SessionManager: ObservableObject {
     private let keychain: KeychainService
     private let mounter: Mounter
     private let logsDir: URL
+    /// Parent of the per-remote rclone VFS cache directories (`<cacheRoot>/<remote UUID>`).
+    private let cacheRoot: URL
     private let rcloneBinary: URL
     private let hostKeyVerifier: HostKeyVerifier?
 
@@ -34,6 +36,7 @@ public final class SessionManager: ObservableObject {
         keychain: KeychainService,
         mounter: Mounter,
         logsDir: URL,
+        cacheRoot: URL? = nil,
         rcloneBinary: URL,
         hostKeyVerifier: HostKeyVerifier? = nil,
         preferences: UserPreferences = UserPreferences(),
@@ -47,6 +50,7 @@ public final class SessionManager: ObservableObject {
         self.keychain = keychain
         self.mounter = mounter
         self.logsDir = logsDir
+        self.cacheRoot = cacheRoot ?? logsDir.deletingLastPathComponent().appendingPathComponent("cache", isDirectory: true)
         self.rcloneBinary = rcloneBinary
         self.hostKeyVerifier = hostKeyVerifier
         self.controlClient = controlClient
@@ -306,6 +310,7 @@ public final class SessionManager: ObservableObject {
     public func delete(_ remoteID: UUID) throws {
         retryTasks[remoteID]?.cancel()
         retryTasks[remoteID] = nil
+        let hadPendingUploads = uploadStatus[remoteID]?.hasPending ?? false
         if let session = sessions.first(where: { $0.id == remoteID }), case .mounted = session.status {
             try? unmountBlocking(remoteID: remoteID)
         }
@@ -322,7 +327,15 @@ public final class SessionManager: ObservableObject {
         var all = try store.load()
         all.removeAll { $0.id == remoteID }
         try store.save(all)
+        // Keep the cache when uploads were still pending: it holds the only copy of those files.
+        if !hadPendingUploads { try? FileManager.default.removeItem(at: cacheDir(for: remoteID)) }
         try reload()
+    }
+
+    /// rclone's own VFS cache directory for one remote, never shared with another remote or
+    /// with other rclone processes (rclone's default is one `~/Library/Caches/rclone` for all).
+    func cacheDir(for remoteID: UUID) -> URL {
+        cacheRoot.appendingPathComponent(remoteID.uuidString, isDirectory: true)
     }
 
     /// Key file path saved for a `.keyFile` SFTP remote (a path, not a secret), so edit
@@ -565,6 +578,7 @@ public final class SessionManager: ObservableObject {
             let logURL = logsDir.appendingPathComponent("\(remote.id.uuidString).log")
             let tuning = remote.effectiveTuning
             let extraArgs = MountOptions.serveArgs(readOnly: remote.readOnly, bandwidthLimit: remote.bandwidthLimit)
+                + MountOptions.cacheDirArgs(cacheDir(for: remote.id))
             let runner = RcloneProcess(binary: rcloneBinary, logFile: logURL)
             let volname = mounter.volumeName(from: remote.name)
             let spawned: RcloneProcess.Spawned

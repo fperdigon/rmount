@@ -396,6 +396,43 @@ final class SessionManagerTests: DebugTestCase {
         try await f.manager.unmount(remoteID: r.id)
     }
 
+    func testMountGivesEachRemoteItsOwnCacheDir() async throws {
+        let f = try makeFixture()
+        let a = makeRemote(backend: ftpBackend())
+        try f.manager.add(a, ftpSecrets: FTPSecrets(password: "pw"))
+        try await f.manager.mount(remoteID: a.id)
+        let lines = f.rclone.recordedLines()
+        let i = try XCTUnwrap(lines.firstIndex(of: "--cache-dir"))
+        XCTAssertEqual(lines[i + 1], f.manager.cacheDir(for: a.id).path)
+        XCTAssertEqual(f.manager.cacheDir(for: a.id).lastPathComponent, a.id.uuidString)
+        XCTAssertEqual(f.manager.cacheDir(for: a.id).deletingLastPathComponent().lastPathComponent, "cache")
+        XCTAssertNotEqual(f.manager.cacheDir(for: a.id), f.manager.cacheDir(for: UUID()))
+        try await f.manager.unmount(remoteID: a.id)
+    }
+
+    func testDeleteRemovesCacheDirWhenNothingPending() throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: sftpBackend())
+        try f.manager.add(r, sftpSecrets: pw)
+        let dir = f.manager.cacheDir(for: r.id)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try f.manager.delete(r.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
+    }
+
+    func testDeleteKeepsCacheDirWhenUploadsPending() async throws {
+        let client = SessionControlClient()
+        let f = try makeFixture(controlClient: client)
+        let r = makeRemote(backend: sftpBackend())
+        try f.manager.add(r, sftpSecrets: pw)
+        let dir = f.manager.cacheDir(for: r.id)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        f.manager.startUploadMonitor(remoteID: r.id, client: client)
+        try await waitForUploads { f.manager.uploadStatus[r.id]?.queuedCount == 1 }
+        try f.manager.delete(r.id)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path))
+    }
+
     func testMountWithoutOptionsHasNoReadOnlyOrBwlimit() async throws {
         let f = try makeFixture()
         let r = makeRemote(backend: ftpBackend(), proto: .nfs)

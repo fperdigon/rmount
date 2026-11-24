@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Each remote now has its own rclone cache folder (`Application Support/ai.rmount/cache/<id>`), so files waiting to upload can no longer be picked up by a different remote. Deleting a remote removes its cache unless uploads were still pending.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed
