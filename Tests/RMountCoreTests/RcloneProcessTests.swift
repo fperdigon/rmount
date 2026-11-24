@@ -114,4 +114,19 @@ final class RcloneProcessTests: DebugTestCase {
             }
         }
     }
+
+    func testLaunchFailureRemovesTempConfigDir() throws {
+        let dir = try makeTempDir()
+        addDebugTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        func tempDirs() -> Set<String> {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)) ?? []
+            return Set(names.filter { $0.hasPrefix("rmount-rclone-") })
+        }
+        let before = tempDirs()
+        let runner = RcloneProcess(binary: URL(fileURLWithPath: "/nonexistent/rclone"),
+                                   logFile: dir.appendingPathComponent("rclone.log"))
+        XCTAssertThrowsError(
+            try runner.spawnNFSServe(remoteName: "r", remotePath: "/", configText: "[r]\n", liveUpdates: false))
+        XCTAssertTrue(tempDirs().subtracting(before).isEmpty)
+    }
 }

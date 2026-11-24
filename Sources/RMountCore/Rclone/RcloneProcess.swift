@@ -89,6 +89,27 @@ public final class RcloneProcess {
             .appendingPathComponent("rmount-rclone-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         let configURL = tmpDir.appendingPathComponent("rclone.conf")
+        // Anything that throws from here on must not leave the temp dir (config) behind.
+        do {
+            return try spawnPrepared(serveSubcommand: serveSubcommand, extraServeArgs: extraServeArgs,
+                remoteName: remoteName, remotePath: remotePath, configText: configText,
+                configURL: configURL, envOverrides: envOverrides, includeAuth: includeAuth)
+        } catch {
+            try? FileManager.default.removeItem(at: tmpDir)
+            throw error
+        }
+    }
+
+    private func spawnPrepared(
+        serveSubcommand: String,
+        extraServeArgs: [String],
+        remoteName: String,
+        remotePath: String,
+        configText: String,
+        configURL: URL,
+        envOverrides: [String: String],
+        includeAuth: Bool
+    ) throws -> Spawned {
         do { try configText.write(to: configURL, atomically: true, encoding: .utf8) }
         catch { throw SpawnError.failedToWriteConfig(error) }
 
@@ -125,6 +146,9 @@ public final class RcloneProcess {
         let logHandle = try FileHandle(forWritingTo: logFile)
         process.standardOutput = logHandle
         process.standardError = logHandle
+        // The child owns its own duplicate of the descriptor; the parent's copy is closed
+        // on success and on failure so it does not leak once per spawn.
+        defer { try? logHandle.close() }
 
         do { try process.run() }
         catch { throw SpawnError.launchFailed(error) }
