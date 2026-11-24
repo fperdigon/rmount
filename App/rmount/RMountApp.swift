@@ -56,6 +56,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             loginItemManager = LoginItemManager()
             menuBar = MenuBarController(manager: manager, loginItemManager: loginItemManager!, prefs: prefs)
             manager.autoMountAll()
+            if let notice = manager.storeNotice {
+                let alert = NSAlert()
+                alert.messageText = "Some remotes could not be read"
+                alert.informativeText = notice
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
         } catch {
             let alert = NSAlert()
             alert.messageText = "RMount failed to start"

@@ -158,6 +158,10 @@ public final class SessionManager: ObservableObject {
         finderBadgeTracker.clear(remoteID: remoteID)
     }
 
+    /// Notice about `remotes.json` entries this version could not read (kept untouched on disk);
+    /// nil when everything loaded. Non-fatal: the app shows it and carries on.
+    public var storeNotice: String? { store.skippedNotice }
+
     public func reload() throws {
         let remotes = try store.load()
         let existingByID = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
