@@ -56,6 +56,7 @@ private final class FakeMounter: Mounter {
     override func resolveMountpoint(name: String) throws -> String { "/Volumes/\(name)" }
 
     override func reconcileLeftoverNFSMounts() -> [String] { [] }
+    override func reconcileOrphanedRclone() -> OrphanReaper.Report { OrphanReaper.Report() }
 
     /// Seconds each `unmount` blocks (simulates a slow or hung diskutil).
     var unmountDelay: TimeInterval = 0

@@ -213,6 +213,17 @@ public class Mounter {
         return cleaned
     }
 
+    /// Stops RMount-owned `rclone serve` processes that no session owns (left by a run that died,
+    /// whether or not they ever got mounted) and unmounts the localhost WebDAV volumes they served,
+    /// even when the remote was renamed or deleted since. See `OrphanReaper` for the safety rules.
+    @discardableResult
+    public func reconcileOrphanedRclone() -> OrphanReaper.Report {
+        OrphanReaper(
+            listMounts: { self.currentLocalMounts() },
+            unmount: { try? self.forceUnmount(mountpoint: $0) }
+        ).reap()
+    }
+
     private static func output(of exe: String, _ args: [String]) -> String {
         guard let r = try? ProcessRunner.run(executable: URL(fileURLWithPath: exe), arguments: args, timeout: 15)
         else { return "" }

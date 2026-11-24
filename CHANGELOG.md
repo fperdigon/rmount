@@ -13,6 +13,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Unmount no longer force-unmounts a volume that is in use: it says so and offers Force Unmount.
 - If rclone exits unexpectedly, a refreshed sign-in token is now saved before its temporary config is deleted, and leftover temporary configs and decrypted keys from a crash are removed at launch.
 - Each remote now has its own rclone cache folder (`Application Support/ai.rmount/cache/<id>`), so files waiting to upload can no longer be picked up by a different remote. Deleting a remote removes its cache unless uploads were still pending. Existing remotes keep rclone's old shared cache (never deleted) until a mount with no pending uploads, so nothing waiting to upload is lost on upgrade.
+- At launch RMount now stops its own rclone processes left behind by a crashed run and unmounts their localhost volumes, also for remotes renamed or deleted since; other rclone processes are never touched.
 
 ## [0.2.0] — 2026-11-22
 

@@ -193,6 +193,7 @@ public final class SessionManager: ObservableObject {
             try? await Self.offMain {
                 for v in volnames { mounter.reconcileStaleMount(volumeName: v) }
                 mounter.reconcileLeftoverNFSMounts()
+                mounter.reconcileOrphanedRclone()
             }
             guard let self else { return }
             for session in self.sessions where session.remote.autoMount {
