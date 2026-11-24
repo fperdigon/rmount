@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- The updater now refuses a download that has no SHA-256 checksum, and before swapping the app it checks that the new app has RMount's bundle id, a valid code signature and (stable channel) is not older than the running version.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed

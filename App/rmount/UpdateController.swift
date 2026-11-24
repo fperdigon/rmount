@@ -95,8 +95,12 @@ final class UpdateController {
             progressLabel?.stringValue = "Installing…"
             let app = Bundle.main.bundleURL
             let digest = update.asset.digest
+            let channel = update.channel
+            let releaseKey = UpdateSignature.configuredPublicKey(Bundle.main.infoDictionary)
+            let releaseSignature = releaseKey == nil ? nil : try await UpdateSignature.fetch(for: update.asset, in: update.release)
             let installed = try await Task.detached(priority: .userInitiated) {
-                try UpdateInstaller.install(dmg: dmg, expectedDigest: digest, over: app)
+                try UpdateInstaller.install(dmg: dmg, expectedDigest: digest, over: app, channel: channel,
+                                            releaseKey: releaseKey, releaseSignature: releaseSignature)
             }.value
             hideProgress()
             try UpdateInstaller.relaunchProcess(appURL: installed).run()

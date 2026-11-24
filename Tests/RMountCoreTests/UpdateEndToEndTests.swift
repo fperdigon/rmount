@@ -74,6 +74,16 @@ final class UpdateEndToEndTests: DebugTestCase {
             let a = dir.appendingPathComponent("rmount.app")
             try FileManager.default.createDirectory(at: a.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
             try marker.write(to: a.appendingPathComponent("Contents/MacOS/exe"), atomically: true, encoding: .utf8)
+            let plist: [String: Any] = ["CFBundleIdentifier": "ai.rmount", "CFBundleShortVersionString": "0.1.3",
+                                        "CFBundleExecutable": "exe", "CFBundlePackageType": "APPL"]
+            try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+                .write(to: a.appendingPathComponent("Contents/Info.plist"))
+            let c = Process()
+            c.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+            c.arguments = ["--force", "--deep", "-s", "-", a.path]
+            c.standardOutput = Pipe(); c.standardError = Pipe()
+            try c.run(); c.waitUntilExit()
+            guard c.terminationStatus == 0 else { throw XCTSkip("codesign unavailable") }
             return a
         }
         let installedDir = top.appendingPathComponent("Applications")
