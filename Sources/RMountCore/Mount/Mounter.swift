@@ -305,8 +305,27 @@ public class Mounter {
         }
     }
 
+    /// Longest a `diskutil`/`umount` run may take before it is killed (a hung one would
+    /// otherwise block its caller forever).
+    var commandDeadline: TimeInterval = 30
+
+    /// Waits for `p` by polling `isRunning` (never `waitUntilExit` after a kill, which can
+    /// miss its wakeup) and SIGKILLs it past the deadline.
+    static func waitWithDeadline(_ p: Process, seconds: TimeInterval) {
+        let end = Date().addingTimeInterval(seconds)
+        while p.isRunning && Date() < end { Thread.sleep(forTimeInterval: 0.02) }
+        if p.isRunning {
+            p.terminate()
+            let grace = Date().addingTimeInterval(1)
+            while p.isRunning && Date() < grace { Thread.sleep(forTimeInterval: 0.02) }
+            if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+            let after = Date().addingTimeInterval(1)
+            while p.isRunning && Date() < after { Thread.sleep(forTimeInterval: 0.02) }
+        }
+    }
+
     private func run(_ executable: String, args: [String], failure: (String, Int32) -> MountError) throws {
-        let r = try ProcessRunner.run(executable: URL(fileURLWithPath: executable), arguments: args, timeout: 120)
+        let r = try ProcessRunner.run(executable: URL(fileURLWithPath: executable), arguments: args, timeout: commandDeadline)
         if r.status != 0 {
             throw failure(r.stderrString, r.status)
         }

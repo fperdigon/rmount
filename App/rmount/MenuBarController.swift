@@ -202,7 +202,7 @@ final class MenuBarController {
             await manager.refreshUploadStatus(remoteID: id)
             let uploads = manager.uploadStatus[id].map { [(remoteName: session.remote.name, status: $0)] } ?? []
             guard UploadSafetyAlert.confirm(UploadGuard.warning(for: .unmount, uploads: uploads)) else { return }
-            do { try manager.delete(id) }
+            do { try await manager.delete(id) }
             catch { NSAlert(error: error).runModal() }
         }
     }

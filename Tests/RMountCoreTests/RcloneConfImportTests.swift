@@ -203,7 +203,7 @@ final class RcloneConfImportManagerTests: DebugTestCase {
         addDebugTeardownBlock { @MainActor in
             TestDebug.log("teardown main-actor body start")
             defer { TestDebug.log("teardown main-actor body finish") }
-            for s in manager.sessions { try? manager.delete(s.id) }
+            for s in manager.sessions { try? await manager.delete(s.id) }
             try? FileManager.default.removeItem(at: dir)
         }
         return (manager, keychain, rclone, dir)
@@ -335,7 +335,7 @@ final class RcloneConfImportSMBManagerTests: DebugTestCase {
         addDebugTeardownBlock { @MainActor in
             TestDebug.log("teardown main-actor body start")
             defer { TestDebug.log("teardown main-actor body finish") }
-            for s in m.sessions { try? m.delete(s.id) }
+            for s in m.sessions { try? await m.delete(s.id) }
             try? FileManager.default.removeItem(at: dir)
         }
         let sections = RcloneConfParser.parse("[nas]\ntype = smb\nhost = nas\nuser = bob\npass = OBS-pw\n")
