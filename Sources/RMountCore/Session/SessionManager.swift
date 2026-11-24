@@ -385,7 +385,7 @@ public final class SessionManager: ObservableObject {
                 case .generatedKey:
                     if let pem = try stored(.privateKey, draft: d?.privateKeyPath) {
                         let url = FileManager.default.temporaryDirectory
-                            .appendingPathComponent("rmount-key-\(remote.id.uuidString)")
+                            .appendingPathComponent(TempNaming.keyName(remoteID: remote.id))
                         try pem.write(to: url, atomically: true, encoding: .utf8)
                         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
                         ephemeralKeyURL = url
@@ -816,14 +816,74 @@ public final class SessionManager: ObservableObject {
             _ = try? await Self.offMain { try mounter.forceUnmount(mountpoint: mp) }
         }
         if let url = session.ephemeralKeyURL { try? FileManager.default.removeItem(at: url) }
+        // rclone is gone, so its config is final: keep a refreshed token, then delete the temp dir.
+        persistRefreshedSecrets(session)
         session.mountpoint = nil
         session.ephemeralKeyURL = nil
+        session.rcloneConfigURL = nil
         var reason = "rclone stopped unexpectedly (exit \(status)); the mount was removed"
         if let tail = Self.logTail(of: logsDir.appendingPathComponent("\(session.id.uuidString).log")) {
             reason += "\n" + tail
         }
         session.transition(to: .failed(reason: reason))
         if session.remote.autoMount { scheduleMount(remoteID: session.id, attempt: 0) }
+    }
+
+    /// Plain argv of all running processes (no environment, so no secrets), or "" on failure.
+    public nonisolated static func liveProcessCommandLines() -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/ps")
+        p.arguments = ["-axww", "-o", "command="]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return "" }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()   // ends when ps exits
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Removes `rmount-rclone-*` dirs and `rmount-key-*` files left in the temp dir by a crash or
+    /// force-quit (they hold a plaintext config or a decrypted key). Call once at launch.
+    /// Only items carrying this app's tag (bundle id) are considered, so another flavor or
+    /// instance is never touched. Legacy untagged items (older builds) are removed only when
+    /// older than `legacyMinAge` and absent from the process argv. Items used by a session
+    /// here, or modified in the last `minAge` seconds, are always kept.
+    @discardableResult
+    public func sweepStaleTempItems(
+        in dir: URL = FileManager.default.temporaryDirectory,
+        tag: String = TempNaming.tag,
+        minAge: TimeInterval = 60,
+        legacyMinAge: TimeInterval = 24 * 3600,
+        now: Date = Date(),
+        processLister: () -> String = SessionManager.liveProcessCommandLines
+    ) -> Int {
+        var keep = Set<String>()
+        for s in sessions {
+            if let c = s.rcloneConfigURL { keep.insert(c.deletingLastPathComponent().lastPathComponent) }
+            if let k = s.ephemeralKeyURL { keep.insert(k.lastPathComponent) }
+        }
+        let fm = FileManager.default
+        let own = [TempNaming.rclonePrefix + tag + "-", TempNaming.keyPrefix + tag + "-"]
+        let legacy = [TempNaming.rclonePrefix, TempNaming.keyPrefix]
+        var live: String?
+        var removed = 0
+        for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where !keep.contains(name) {
+            let isOwn = own.contains { name.hasPrefix($0) }
+            let isLegacy = !isOwn && legacy.contains { prefix in
+                name.hasPrefix(prefix) && UUID(uuidString: String(name.dropFirst(prefix.count))) != nil
+            }
+            guard isOwn || isLegacy else { continue }
+            let url = dir.appendingPathComponent(name)
+            let age = ((try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date)
+                .map { now.timeIntervalSince($0) } ?? .infinity
+            if age < (isLegacy ? max(minAge, legacyMinAge) : minAge) { continue }
+            if isLegacy {
+                if live == nil { live = processLister() }
+                if live!.contains(name) { continue }
+            }
+            if (try? fm.removeItem(at: url)) != nil { removed += 1 }
+        }
+        return removed
     }
 
     /// Unmounts every mounted remote at app quit. The unmounts run in parallel and the whole

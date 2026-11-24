@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 hostKeyVerifier: verifier
             )
             try manager.reload()
+            manager.sweepStaleTempItems()
             loginItemManager = LoginItemManager()
             menuBar = MenuBarController(manager: manager, loginItemManager: loginItemManager!, prefs: prefs)
             manager.autoMountAll()
