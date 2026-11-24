@@ -112,6 +112,19 @@ final class OAuthAuthorizerTests: DebugTestCase {
         }
     }
 
+    func testCancelBeforeProcessIsStoredStillCancels() async throws {
+        let (rclone, dir) = try make()
+        try "hang".write(to: dir.appendingPathComponent("authorize-mode.txt"), atomically: true, encoding: .utf8)
+        let auth = OAuthAuthorizer()
+        auth.cancel()    // arrives before authorize() has launched anything
+        do {
+            _ = try await auth.authorize(binary: rclone.binary, backend: "drive")
+            XCTFail("expected cancellation")
+        } catch {
+            XCTAssertEqual(error as? OAuthError, .cancelled)
+        }
+    }
+
     func testMissingBinaryReportsLaunchFailure() async {
         do {
             _ = try await OAuthAuthorizer().authorize(binary: URL(fileURLWithPath: "/nonexistent/rclone"), backend: "drive")

@@ -9,6 +9,17 @@ private final class FakeMounter: Mounter {
     private var _nfsMounts: [(port: Int, mountpoint: String)] = []
     private var _unmounted: [String] = []
     private var _reconciled: [String] = []
+    private var _entered = false
+    private let gate = DispatchSemaphore(value: 0)
+    private var _gated = false
+
+    /// Makes mountWebDAV block (off the main thread) until `releaseMount()`.
+    var gateMount: Bool {
+        get { lock.withLock { _gated } }
+        set { lock.withLock { _gated = newValue } }
+    }
+    var enteredMount: Bool { lock.withLock { _entered } }
+    func releaseMount() { gate.signal() }
 
     var failMount: Bool {
         get { lock.withLock { _failMount } }
@@ -21,6 +32,10 @@ private final class FakeMounter: Mounter {
 
     override func mountWebDAV(host: String, port: Int, baseurl: String, user: String, password: String) throws -> String {
         if failMount { throw Mounter.MountError.netFSFailed(status: 1) }
+        if gateMount {
+            lock.withLock { _entered = true }
+            gate.wait()
+        }
         lock.withLock { _webdavMounts.append((port, baseurl)) }
         return "/Volumes/fake\(baseurl)"
     }
@@ -532,6 +547,91 @@ final class SessionManagerTests: DebugTestCase {
 
         XCTAssertEqual(f.mounter.unmounted.count, 1)
         XCTAssertTrue(f.manager.sessions.isEmpty)
+    }
+
+    // MARK: - Cancelling a mount that is starting
+
+    /// Starts a mount whose NetFS call is parked, and waits until it is parked.
+    private func startGatedMount(_ f: Fixture, _ r: Remote) async throws -> Task<Void, Error> {
+        f.mounter.gateMount = true
+        let task = Task { @MainActor in try await f.manager.mount(remoteID: r.id) }
+        for _ in 0..<200 where !f.mounter.enteredMount { try await Task.sleep(nanoseconds: 50_000_000) }
+        XCTAssertTrue(f.mounter.enteredMount, "mount never reached NetFS")
+        return task
+    }
+
+    func testDeleteDuringStartStopsRcloneAndUnmounts() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        let task = try await startGatedMount(f, r)
+        let proc = try XCTUnwrap(f.manager.mountAttempts[r.id]?.process)
+        XCTAssertTrue(f.manager.isMountInFlight(remoteID: r.id))
+
+        try f.manager.delete(r.id)
+        f.mounter.releaseMount()
+        try await task.value
+
+        XCTAssertTrue(f.manager.sessions.isEmpty)
+        XCTAssertFalse(f.manager.isMountInFlight(remoteID: r.id))
+        XCTAssertEqual(f.mounter.unmounted.count, 1, "the volume mounted after the delete must be unmounted")
+        proc.debugWaitUntilExit()
+        XCTAssertFalse(proc.isRunning)
+    }
+
+    func testQuitDuringStartStopsRcloneAndLeavesNothingMounted() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        let task = try await startGatedMount(f, r)
+        let proc = try XCTUnwrap(f.manager.mountAttempts[r.id]?.process)
+
+        f.manager.shutdownAll()
+        proc.debugWaitUntilExit()
+        XCTAssertFalse(proc.isRunning, "rclone must be stopped at quit even though NetFS is still running")
+        f.mounter.releaseMount()
+        try await task.value
+
+        XCTAssertEqual(f.manager.sessions[0].status, .idle)
+        XCTAssertNil(f.manager.sessions[0].rcloneProcess)
+        XCTAssertEqual(f.mounter.unmounted.count, 1)
+    }
+
+    func testCancelMountReturnsToIdle() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        let task = try await startGatedMount(f, r)
+
+        f.manager.cancelMount(remoteID: r.id)
+        f.mounter.releaseMount()
+        try await task.value
+
+        XCTAssertEqual(f.manager.sessions[0].status, .idle)
+        XCTAssertEqual(f.mounter.unmounted.count, 1)
+        XCTAssertFalse(f.manager.isMountInFlight(remoteID: r.id))
+        f.manager.cancelMount(remoteID: r.id)    // no attempt: no-op
+    }
+
+    func testRcloneExitBeforeMountCompletesFailsTheMount() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        let task = try await startGatedMount(f, r)
+        let proc = try XCTUnwrap(f.manager.mountAttempts[r.id]?.process)
+
+        proc.terminate()
+        proc.debugWaitUntilExit()
+        f.mounter.releaseMount()
+        let error = await thrownError { try await task.value }
+
+        XCTAssertNotNil(error)
+        guard case .failed(let reason) = f.manager.sessions[0].status else {
+            return XCTFail("expected failed status, got \(f.manager.sessions[0].status)")
+        }
+        XCTAssertTrue(reason.contains("exited before the mount completed"), reason)
+        XCTAssertNil(f.manager.sessions[0].rcloneProcess)
+        XCTAssertEqual(f.mounter.unmounted.count, 1, "the half-made mount must be removed")
     }
 
     // MARK: - Auto-mount

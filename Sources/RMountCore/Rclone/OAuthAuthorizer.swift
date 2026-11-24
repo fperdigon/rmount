@@ -78,10 +78,17 @@ public final class OAuthAuthorizer {
         p.standardOutput = out
         p.standardError = out
 
-        lock.lock(); cancelled = false; timedOut = false; lock.unlock()
+        // A cancel() that arrived before the process was stored must still take effect, so
+        // `cancelled` is not reset here; it is cleared when the run ends.
+        lock.lock(); timedOut = false; let alreadyCancelled = cancelled; lock.unlock()
+        if alreadyCancelled {
+            lock.lock(); cancelled = false; lock.unlock()
+            throw OAuthError.cancelled
+        }
         do { try p.run() } catch { throw OAuthError.launchFailed(error.localizedDescription) }
-        lock.lock(); process = p; lock.unlock()
-        defer { lock.lock(); process = nil; lock.unlock() }
+        lock.lock(); process = p; let cancelledWhileLaunching = cancelled; lock.unlock()
+        defer { lock.lock(); process = nil; cancelled = false; lock.unlock() }
+        if cancelledWhileLaunching { p.terminate() }
 
         let timer = DispatchWorkItem { [weak self] in
             guard let self, p.isRunning else { return }
