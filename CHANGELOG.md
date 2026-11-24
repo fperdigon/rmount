@@ -18,6 +18,11 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Passwords, the local WebDAV credentials and the OAuth client secret no longer appear in rclone's command line (visible to other local users in `ps`); they go through stdin and environment variables. A failing `rclone obscure` now errors instead of mounting with an empty password.
 - One unreadable entry in `remotes.json` no longer stops RMount from starting: the other remotes load, the unreadable entry is kept as is (after a `remotes.json.bak` backup) and a notice says what was skipped.
+### Security
+
+- Remote names are checked on add, edit and import, and the NFS mountpoint is built from a sanitized name that must stay under `~/rmount`, so a name such as `a/b` or `../x` no longer breaks mounting or escapes the folder.
+- Line breaks and control characters in host, user and option values are refused instead of being written into the rclone config.
+- An SFTP connection is never started without host-key checking.
 
 ## [0.2.0] — 2026-11-22
 

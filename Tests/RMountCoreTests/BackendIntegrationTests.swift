@@ -222,6 +222,7 @@ final class BackendIntegrationTests: DebugTestCase {
         let manager = SessionManager(
             store: RemoteStore(directory: dir), keychain: KeychainService(serviceName: "rmount.it.\(UUID().uuidString)"),
             mounter: Mounter(), logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone, finderBadgeTracker: FinderBadgeTracker(writer: NoopFinderBadgeStatusWriter()))
+        manager.allowMissingHostKeyVerifier = true
         addDebugTeardownBlock { @MainActor in
             TestDebug.log("teardown main-actor body start")
             defer { TestDebug.log("teardown main-actor body finish") }

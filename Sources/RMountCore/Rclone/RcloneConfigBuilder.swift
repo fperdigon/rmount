@@ -52,6 +52,8 @@ public enum RcloneConfigError: Error, Equatable, LocalizedError {
     case missingS3Credentials
     case missingFTPPassword
     case missingSecret(String)
+    /// A value holds a line break or another control character, which would add config lines.
+    case invalidValue(String)
 
     public var errorDescription: String? {
         switch self {
@@ -59,6 +61,7 @@ public enum RcloneConfigError: Error, Equatable, LocalizedError {
         case .passwordAuthRequiresPassword: return "No password is saved for this remote."
         case .missingS3Credentials: return "The access key ID or secret access key is missing."
         case .missingFTPPassword: return "No password is saved for this remote."
+        case .invalidValue(let field): return "The value of \"\(field)\" contains a line break or control character."
         case .missingSecret(let name): return "The saved value for \"\(name)\" is missing (sign in or enter it again)."
         }
     }
@@ -124,6 +127,13 @@ public enum RcloneConfigBuilder {
             }
         }
 
+        // Every value is written as `key = value` on one line, so a CR, LF or other control
+        // character in any of them (host, user, option, path) would smuggle in extra options.
+        for line in lines where line.unicodeScalars.contains(where: { RemoteName.isControl($0) }) {
+            let key = line.split(separator: "=", maxSplits: 1).first
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? "value"
+            throw RcloneConfigError.invalidValue(String(key.unicodeScalars.filter { !RemoteName.isControl($0) }))
+        }
         return lines.joined(separator: "\n") + "\n"
     }
 

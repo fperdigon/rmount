@@ -121,12 +121,22 @@ public class Mounter {
         } catch {
             throw MountError.mountpointCreationFailed(error.localizedDescription)
         }
-        var candidate = base.appendingPathComponent(name).path
+        // The raw remote name may hold "/", "..", or a leading dash; only a sanitized single
+        // component is ever appended, and the result must stay directly under the base.
+        let name = RemoteName.pathComponent(from: name)
+        func inBase(_ component: String) throws -> String {
+            let url = base.appendingPathComponent(component)
+            guard url.deletingLastPathComponent().standardizedFileURL.path == base.standardizedFileURL.path else {
+                throw MountError.mountpointCreationFailed("the name \"\(name)\" is not allowed")
+            }
+            return url.path
+        }
+        var candidate = try inBase(name)
         var counter = 2
         while fm.fileExists(atPath: candidate) {
             let contents = (try? fm.contentsOfDirectory(atPath: candidate)) ?? ["?"]
             if contents.isEmpty && !isMountPoint(candidate) { return candidate }
-            candidate = base.appendingPathComponent("\(name)-\(counter)").path
+            candidate = try inBase("\(name)-\(counter)")
             counter += 1
         }
         do {

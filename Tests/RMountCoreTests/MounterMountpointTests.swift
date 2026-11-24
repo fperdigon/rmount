@@ -37,6 +37,21 @@ final class MounterMountpointTests: DebugTestCase {
         XCTAssertEqual(second, base.appendingPathComponent("DevEnv-2").path)
     }
 
+    func testNamesWithSeparatorsOrDotsStayUnderBase() throws {
+        let m = Mounter(mountBase: base)
+        let std = base.standardizedFileURL.path
+        for name in ["a/b", "../x", "..", ".", "-rf", "/etc", ".hidden", "a\nb", "   "] {
+            let mp = try m.resolveMountpoint(name: name)
+            let url = URL(fileURLWithPath: mp)
+            XCTAssertEqual(url.deletingLastPathComponent().standardizedFileURL.path, std, name)
+            let leaf = url.lastPathComponent
+            XCTAssertFalse(leaf.hasPrefix("."), name)
+            XCTAssertFalse(leaf.hasPrefix("-"), name)
+        }
+        XCTAssertEqual(try m.resolveMountpoint(name: "a/b"), base.appendingPathComponent("a-b").path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: base.deletingLastPathComponent().appendingPathComponent("x").path))
+    }
+
     func testCreatesMissingBaseDirectory() throws {
         XCTAssertFalse(FileManager.default.fileExists(atPath: base.path))
         _ = try Mounter(mountBase: base).resolveMountpoint(name: "x")

@@ -28,6 +28,9 @@ public final class SessionManager: ObservableObject {
     private var legacyCacheMounts: Set<UUID> = []
     private let rcloneBinary: URL
     private let hostKeyVerifier: HostKeyVerifier?
+    /// Tests only: lets an SFTP remote run without a host-key verifier. In the app a missing
+    /// verifier is an error, never "no host-key checking".
+    var allowMissingHostKeyVerifier = false
 
     /// How long `mount` waits for rclone to start listening. Overridable for tests.
     public var portWaitTimeout: TimeInterval = 30
@@ -263,6 +266,7 @@ public final class SessionManager: ObservableObject {
     }
 
     public func add(_ remote: Remote, sftpSecrets: SFTPSecrets? = nil, s3Secrets: S3Secrets? = nil, ftpSecrets: FTPSecrets? = nil, optionSecrets: [String: String]? = nil) throws {
+        try RemoteName.validate(remote.name)
         if let s = sftpSecrets {
             if let pwd = s.password { try keychain.set(remoteID: remote.id, kind: .password, value: pwd) }
             if let pp = s.keyPassphrase { try keychain.set(remoteID: remote.id, kind: .keyPassphrase, value: pp) }
@@ -290,6 +294,7 @@ public final class SessionManager: ObservableObject {
     /// non-nil and non-empty values overwrite the keychain. The session reference
     /// is preserved so an in-flight `.starting` status survives the update.
     public func update(_ remote: Remote, sftpSecrets: SFTPSecrets? = nil, s3Secrets: S3Secrets? = nil, ftpSecrets: FTPSecrets? = nil, optionSecrets: [String: String]? = nil) throws {
+        try RemoteName.validate(remote.name)
         if let s = sftpSecrets {
             if let pwd = s.password, !pwd.isEmpty { try keychain.set(remoteID: remote.id, kind: .password, value: pwd) }
             if let pp = s.keyPassphrase, !pp.isEmpty { try keychain.set(remoteID: remote.id, kind: .keyPassphrase, value: pp) }
@@ -462,6 +467,9 @@ public final class SessionManager: ObservableObject {
                     let host = sftp.host, port = sftp.port
                     let inspection = try await Self.offMain { try verifier.inspect(host: host, port: port) }
                     try verifier.resolve(inspection)     // dialog + known_hosts on the main actor
+                } else if !allowMissingHostKeyVerifier {
+                    // Never run SFTP without known_hosts checking.
+                    throw HostKeyError.verifierUnavailable
                 }
                 remotePath = sftp.remotePath
 
@@ -578,7 +586,7 @@ public final class SessionManager: ObservableObject {
                     }
                 }
                 imported.remote.name = RcloneConfImporter.uniqueName(
-                    section.name, existing: sessions.map { $0.remote.name })
+                    RemoteName.pathComponent(from: section.name), existing: sessions.map { $0.remote.name })
                 do {
                     try add(imported.remote, sftpSecrets: imported.sftp, s3Secrets: imported.s3,
                             ftpSecrets: imported.ftp, optionSecrets: imported.options.isEmpty ? nil : imported.options)
