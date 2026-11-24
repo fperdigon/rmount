@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A mount that is still starting can now be cancelled from the menu, and deleting a remote or quitting during start no longer leaves rclone or the volume behind. Edit and Delete are disabled while a remote is starting or stopping.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed

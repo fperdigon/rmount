@@ -306,6 +306,7 @@ public final class SessionManager: ObservableObject {
     public func delete(_ remoteID: UUID) throws {
         retryTasks[remoteID]?.cancel()
         retryTasks[remoteID] = nil
+        if let attempt = mountAttempts[remoteID] { abort(attempt, unmountBlocking: true) }
         if let session = sessions.first(where: { $0.id == remoteID }), case .mounted = session.status {
             try? unmountBlocking(remoteID: remoteID)
         }
@@ -538,8 +539,45 @@ public final class SessionManager: ObservableObject {
         return summary
     }
 
+    /// What one mount attempt has created so far, so a cancel (delete, quit, user) can undo it
+    /// even while an off-main NetFS / `mount_nfs` call is still running.
+    @MainActor
+    final class MountAttempt {
+        var task: Task<Void, Error>?
+        var process: Process?
+        var configURL: URL?
+        var ephemeralKeyURL: URL?
+        var mountpoint: String?
+        var cancelled = false
+    }
+
+    private(set) var mountAttempts: [UUID: MountAttempt] = [:]
+
+    /// True while a mount for this remote is starting (cancellable).
+    public func isMountInFlight(remoteID: UUID) -> Bool { mountAttempts[remoteID] != nil }
+
+    /// Cancels a mount that is still starting: stops the rclone it spawned and unmounts
+    /// anything it already mounted. The session returns to idle.
+    public func cancelMount(remoteID: UUID) {
+        guard let attempt = mountAttempts[remoteID] else { return }
+        abort(attempt, unmountBlocking: false)
+    }
+
+    /// Marks the attempt cancelled and tears down what exists now, synchronously. The
+    /// attempt's own task re-checks after each await and finishes any remaining cleanup.
+    private func abort(_ attempt: MountAttempt, unmountBlocking blocking: Bool) {
+        attempt.cancelled = true
+        attempt.task?.cancel()
+        if let proc = attempt.process, proc.isRunning { proc.terminate() }
+        if blocking, let mp = attempt.mountpoint {
+            try? mounter.unmount(mountpoint: mp)
+            attempt.mountpoint = nil
+        }
+    }
+
     /// Mounts a remote. Everything that blocks (rclone start-up, host-key scan, NetFS,
-    /// mount_nfs) runs off the main thread; only state changes and dialogs use it.
+    /// mount_nfs) runs off the main thread; only state changes and dialogs use it. The work
+    /// runs as a task tracked per remote so `cancelMount`, `delete` and `shutdownAll` can stop it.
     public func mount(remoteID: UUID) async throws {
         guard let session = sessions.first(where: { $0.id == remoteID }) else { return }
         switch session.status {
@@ -547,18 +585,57 @@ public final class SessionManager: ObservableObject {
         default: break
         }
         session.transition(to: .starting)
+        let attempt = MountAttempt()
+        mountAttempts[remoteID] = attempt
+        // Unstructured on purpose: cancelling the caller (e.g. a superseded retry task) must
+        // not abort a mount that is already in flight.
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { if self.mountAttempts[remoteID] === attempt { self.mountAttempts[remoteID] = nil } }
+            try await self.performMount(session: session, attempt: attempt)
+        }
+        attempt.task = task
+        try await task.value
+    }
+
+    /// Still wanted: not cancelled, and the session is still in the list.
+    private func isWanted(_ session: RemoteSession, _ attempt: MountAttempt) -> Bool {
+        !attempt.cancelled && !Task.isCancelled && sessions.contains(where: { $0 === session })
+    }
+
+    private func performMount(session: RemoteSession, attempt: MountAttempt) async throws {
+        let remoteID = session.id
         let mounter = self.mounter
         let rcloneBinary = self.rcloneBinary
 
         let remote = session.remote
         let logFile = logsDir.appendingPathComponent("\(remote.id.uuidString).log")
-        var ephemeralKeyURL: URL? = nil
-        var spawnedProcess: Process? = nil
-        var spawnedConfig: URL? = nil
+
+        /// Undoes whatever the attempt created. Safe to call twice.
+        func rollback() async {
+            if let proc = attempt.process, proc.isRunning { proc.terminate() }
+            if let url = attempt.ephemeralKeyURL { try? FileManager.default.removeItem(at: url) }
+            if let cfg = attempt.configURL { try? FileManager.default.removeItem(at: cfg.deletingLastPathComponent()) }
+            attempt.ephemeralKeyURL = nil
+            attempt.configURL = nil
+            if let mp = attempt.mountpoint {
+                attempt.mountpoint = nil
+                _ = try? await Self.offMain { try mounter.unmount(mountpoint: mp) }
+            }
+        }
+        /// Cancelled: roll back and leave the session idle (or gone) without an error.
+        func finishCancelled() async {
+            stopUploadMonitor(remoteID: remoteID)
+            await rollback()
+            if sessions.contains(where: { $0 === session }), case .starting = session.status {
+                session.transition(to: .idle)
+            }
+        }
 
         do {
             let prepared = try await prepareRclone(for: remote, draft: nil)
-            ephemeralKeyURL = prepared.ephemeralKeyURL
+            attempt.ephemeralKeyURL = prepared.ephemeralKeyURL
+            guard isWanted(session, attempt) else { return await finishCancelled() }
             let configText = prepared.configText
             let envOverrides = prepared.envOverrides
             let remotePath = prepared.remotePath
@@ -591,9 +668,23 @@ public final class SessionManager: ObservableObject {
                     extraArgs: extraArgs
                 )
             }
-            spawnedProcess = spawned.process
-            spawnedConfig = spawned.configURL
+            attempt.process = spawned.process
+            attempt.configURL = spawned.configURL
+            // Attached right after spawning so an exit at any later point is seen. While the
+            // session is still starting handleRcloneExit ignores it and the isRunning check
+            // below fails the mount; once mounted it drops the mount.
+            let watched = spawned.process
+            watched.terminationHandler = { [weak self, weak session] _ in
+                // Bind strong locals first: older compilers reject using the captured weak
+                // vars inside the concurrently-executing Task.
+                guard let manager = self, let exited = session else { return }
+                Task { @MainActor in
+                    await manager.handleRcloneExit(session: exited, process: watched)
+                }
+            }
+            guard isWanted(session, attempt) else { return await finishCancelled() }
             try await waitForPort(spawned.port, process: spawned.process, timeout: portWaitTimeout)
+            guard isWanted(session, attempt) else { return await finishCancelled() }
 
             let mountpoint: String
             switch remote.mountProtocol {
@@ -610,27 +701,25 @@ public final class SessionManager: ObservableObject {
                     return mp
                 }
             }
+            attempt.mountpoint = mountpoint
+            guard isWanted(session, attempt) else { return await finishCancelled() }
+            guard watched.isRunning else {
+                throw NSError(domain: "rmount", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "rclone exited before the mount completed (exit \(watched.terminationStatus))"])
+            }
 
             session.rcloneProcess = spawned.process
-            let watched = spawned.process
-            watched.terminationHandler = { [weak self, weak session] _ in
-                // Bind strong locals first: older compilers reject using the captured weak
-                // vars inside the concurrently-executing Task.
-                guard let manager = self, let exited = session else { return }
-                Task { @MainActor in
-                    await manager.handleRcloneExit(session: exited, process: watched)
-                }
-            }
             session.mountpoint = mountpoint
-            session.ephemeralKeyURL = ephemeralKeyURL
+            session.ephemeralKeyURL = attempt.ephemeralKeyURL
             session.rcloneConfigURL = spawned.configURL
             session.transition(to: .mounted(at: mountpoint))
             startUploadMonitor(remoteID: remoteID, client: controlClient(spawned))
         } catch {
+            if attempt.cancelled || !sessions.contains(where: { $0 === session }) {
+                return await finishCancelled()
+            }
             stopUploadMonitor(remoteID: remoteID)
-            if let url = ephemeralKeyURL { try? FileManager.default.removeItem(at: url) }
-            if let proc = spawnedProcess, proc.isRunning { proc.terminate() }
-            if let cfg = spawnedConfig { try? FileManager.default.removeItem(at: cfg.deletingLastPathComponent()) }
+            await rollback()
             var reason = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
             // rclone's own explanation (bad key, auth failure, ...) only goes to its log.
             if let tail = Self.logTail(of: logFile) { reason += "\n" + tail }
@@ -737,6 +826,7 @@ public final class SessionManager: ObservableObject {
     public func shutdownAll() {
         for (_, task) in retryTasks { task.cancel() }
         retryTasks.removeAll()
+        for attempt in Array(mountAttempts.values) { abort(attempt, unmountBlocking: true) }
         // Invalidate every callback before unmounting: even a busy volume must not
         // republish Finder progress while the app is quitting.
         for remoteID in Array(uploadMonitors.keys) { stopUploadMonitor(remoteID: remoteID) }

@@ -71,15 +71,22 @@ public final class OAuthAuthorizer {
         var env = ProcessInfo.processInfo.environment
         if let scope, !scope.isEmpty { env["RCLONE_\(backend.uppercased())_SCOPE"] = scope }
 
-        lock.lock(); cancelled = false; timedOut = false; lock.unlock()
-        defer { lock.lock(); process = nil; lock.unlock() }
+        // A cancel() that arrived before the process was stored must still take effect, so
+        // `cancelled` is not reset here; it is cleared when the run ends.
+        lock.lock(); timedOut = false; let alreadyCancelled = cancelled; lock.unlock()
+        if alreadyCancelled {
+            lock.lock(); cancelled = false; lock.unlock()
+            throw OAuthError.cancelled
+        }
+        defer { lock.lock(); process = nil; cancelled = false; lock.unlock() }
         let result: ProcessResult
         do {
             result = try ProcessRunner.run(
                 executable: binary, arguments: args, environment: env, mergeStderr: true, timeout: timeout,
                 onStart: { [weak self] p in
                     guard let self else { return }
-                    self.lock.lock(); self.process = p; self.lock.unlock()
+                    self.lock.lock(); self.process = p; let cancelledWhileLaunching = self.cancelled; self.lock.unlock()
+                    if cancelledWhileLaunching { p.terminate() }
                 })
         } catch { throw OAuthError.launchFailed(error.localizedDescription) }
         if result.timedOut { lock.lock(); timedOut = true; lock.unlock() }
