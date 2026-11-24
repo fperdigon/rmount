@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -14,8 +17,9 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0       # the new-code coverage gate diffs against the base branch
 
       - name: Swift version
@@ -47,7 +51,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-report
           path: coverage.txt
@@ -75,7 +79,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit $status
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: github.event_name == 'pull_request' && always()
         with:
           name: diff-coverage
@@ -88,7 +92,9 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Start Nextcloud
         run: ./scripts/ci/start-nextcloud.sh
@@ -115,7 +121,9 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Start SFTP, FTP and S3 servers
         run: ./scripts/ci/start-backends.sh
@@ -142,7 +150,9 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Start Azurite
         run: ./scripts/ci/start-azurite.sh
@@ -176,7 +186,9 @@ jobs:
       RMOUNT_IT_GCS_BUCKET: ${{ secrets.RMOUNT_IT_GCS_BUCKET || secrets.MACSH_IT_GCS_BUCKET }}
       RMOUNT_IT_GCS_PROJECT: ${{ secrets.RMOUNT_IT_GCS_PROJECT || secrets.MACSH_IT_GCS_PROJECT }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Check for test accounts
         run: |
@@ -203,7 +215,9 @@ jobs:
       RMOUNT_IT_GDRIVE_CLIENT_SECRET: ${{ secrets.RMOUNT_IT_GDRIVE_CLIENT_SECRET || secrets.MACSH_IT_GDRIVE_CLIENT_SECRET }}
       RMOUNT_IT_GDRIVE_FOLDER: ${{ secrets.RMOUNT_IT_GDRIVE_FOLDER || secrets.MACSH_IT_GDRIVE_FOLDER }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Check for test account
         run: |
@@ -225,7 +239,9 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Install xcodegen
         run: brew install xcodegen
