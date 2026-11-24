@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- One unreadable entry in `remotes.json` no longer stops RMount from starting: the other remotes load, the unreadable entry is kept as is (after a `remotes.json.bak` backup) and a notice says what was skipped.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed
