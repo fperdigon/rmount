@@ -10,6 +10,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A mount that is still starting can now be cancelled from the menu, and deleting a remote or quitting during start no longer leaves rclone or the volume behind. Edit and Delete are disabled while a remote is starting or stopping.
 - Deleting a mounted remote and quitting no longer freeze the menu bar while a volume unmounts: deleting unmounts in the background, quitting unmounts all remotes in parallel with a time limit, and a hung `diskutil` is killed after 30 seconds.
+- Unmount no longer force-unmounts a volume that is in use: it says so and offers Force Unmount.
 
 ## [0.2.0] — 2026-11-22
 
