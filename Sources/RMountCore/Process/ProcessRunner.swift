@@ -20,6 +20,7 @@ public enum ProcessRunner {
     /// - Parameters:
     ///   - environment: full child environment; `nil` inherits ours.
     ///   - mergeStderr: send stderr into the stdout pipe (`stderr` is then empty).
+    ///   - stdin: bytes written to the child's standard input, which is then closed (keeps secrets out of argv).
     ///   - timeout: seconds before SIGTERM; `nil` waits forever.
     ///   - killGrace: seconds between SIGTERM and SIGKILL.
     ///   - onStart: called with the running process (e.g. to allow cancelling it).
@@ -28,6 +29,7 @@ public enum ProcessRunner {
         arguments: [String] = [],
         environment: [String: String]? = nil,
         mergeStderr: Bool = false,
+        stdin: Data? = nil,
         timeout: TimeInterval? = 30,
         killGrace: TimeInterval = 2,
         onStart: ((Process) -> Void)? = nil
@@ -39,6 +41,8 @@ public enum ProcessRunner {
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
         p.standardError = mergeStderr ? out : err
+        let inPipe: Pipe? = stdin == nil ? nil : Pipe()
+        if let inPipe { p.standardInput = inPipe }
 
         // Wait on a semaphore, not waitUntilExit(), which can miss its wakeup.
         let exited = DispatchSemaphore(value: 0)
@@ -47,6 +51,12 @@ public enum ProcessRunner {
         // Our copy of the write ends must not stay open, or EOF never arrives.
         try? out.fileHandleForWriting.close()
         if !mergeStderr { try? err.fileHandleForWriting.close() }
+        if let inPipe, let stdin {
+            // A child that exits before reading its stdin must not kill us with SIGPIPE.
+            signal(SIGPIPE, SIG_IGN)
+            try? inPipe.fileHandleForWriting.write(contentsOf: stdin)
+            try? inPipe.fileHandleForWriting.close()
+        }
         onStart?(p)
 
         let readers = DispatchGroup()
