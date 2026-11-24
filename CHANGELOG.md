@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The Finder badge snapshot now carries a schema version, and the extension ignores snapshots from a newer app.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed

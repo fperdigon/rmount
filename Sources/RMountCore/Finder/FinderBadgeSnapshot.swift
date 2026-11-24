@@ -51,15 +51,39 @@ public struct FinderBadgeSnapshot: Codable, Equatable {
         }
     }
 
+    /// Schema version this build writes and understands. Bump it only for a change an older reader would misread;
+    /// adding optional fields does not need a bump. Snapshots without the field are version 1.
+    public static let currentSchemaVersion = 1
+
+    public var schemaVersion: Int
     public var roots: [String]
     public var items: [Item]
     public var writtenAt: Double
 
-    public init(roots: [String] = [], items: [Item] = [], writtenAt: Double = Date().timeIntervalSince1970) {
-        self.roots = roots; self.items = items; self.writtenAt = writtenAt
+    public init(roots: [String] = [], items: [Item] = [], writtenAt: Double = Date().timeIntervalSince1970,
+                schemaVersion: Int = FinderBadgeSnapshot.currentSchemaVersion) {
+        self.roots = roots; self.items = items; self.writtenAt = writtenAt; self.schemaVersion = schemaVersion
     }
 
+    private enum CodingKeys: String, CodingKey { case schemaVersion, roots, items, writtenAt }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        roots = try c.decode([String].self, forKey: .roots)
+        items = try c.decode([Item].self, forKey: .items)
+        writtenAt = try c.decode(Double.self, forKey: .writtenAt)
+    }
+
+    /// Reads only the version, so a snapshot from a newer app is recognised even if its items no longer decode.
+    public static func schemaVersion(of data: Data) -> Int {
+        struct Probe: Decodable { var schemaVersion: Int? }
+        return (try? JSONDecoder().decode(Probe.self, from: data))?.schemaVersion ?? 1
+    }
+
+    public static func isSupported(data: Data) -> Bool { schemaVersion(of: data) <= currentSchemaVersion }
+
     public func validated() throws -> FinderBadgeSnapshot {
+        guard schemaVersion <= Self.currentSchemaVersion else { throw ValidationError.invalid }
         guard roots.allSatisfy({ $0.hasPrefix("/") }), items.allSatisfy({
             $0.path.hasPrefix("/") && ($0.fraction.map { $0.isFinite && (0...1).contains($0) } ?? true)
         }) else { throw ValidationError.invalid }
