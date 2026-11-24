@@ -2,14 +2,15 @@ import XCTest
 @testable import RMountCore
 
 private actor RefreshRecorder: RcloneControlClient {
-    private(set) var dirs: [String?] = []
+    private(set) var calls: [[String]] = []
+    var dirs: [String] { calls.flatMap { $0 } }
     private(set) var forgets = 0
     var fails = false
     var gate: CheckedContinuation<Void, Never>?
     var blocking = false
     func vfsQueue() async throws -> VFSQueue { VFSQueue() }
-    func vfsRefresh(dir: String?) async throws {
-        dirs.append(dir)
+    func vfsRefresh(dirs: [String]) async throws {
+        calls.append(dirs)
         if blocking { await withCheckedContinuation { gate = $0 } }
         if fails { throw URLError(.cannotConnectToHost) }
     }
@@ -72,10 +73,8 @@ final class FocusFolderRefresherTests: DebugTestCase {
         r.register(remoteID: remoteA, mountpoint: "/Users/u/rmount/box", client: client)
         file.directories = ["/Users/u/rmount/box", "/Users/u/rmount/box/My Docs/ñandú/2024"]
         await r.poll().value
-        let dirs = await client.dirs
-        XCTAssertEqual(dirs.count, 2)
-        XCTAssertTrue(dirs.contains(where: { $0 == nil }), "root is refreshed with no dir parameter")
-        XCTAssertTrue(dirs.contains("My Docs/ñandú/2024"))
+        let calls = await client.calls
+        XCTAssertEqual(calls, [["", "My Docs/ñandú", "My Docs/ñandú/2024"]], "root once, parent before child, one call")
     }
 
     func testFoldersOutsideMountsAreIgnoredAndLongestMountWins() async throws {
@@ -86,11 +85,19 @@ final class FocusFolderRefresherTests: DebugTestCase {
         file.directories = ["/Users/u/Documents", "/m/outer/x", "/m/outer/inner/y", "/m/outerish/z"]
         await r.poll().value
         let outerDirs = await outer.dirs, innerDirs = await inner.dirs
-        XCTAssertEqual(outerDirs, ["x"])
-        XCTAssertEqual(innerDirs, ["y"])
+        XCTAssertEqual(outerDirs, ["", "x"])
+        XCTAssertEqual(innerDirs, ["", "y"])
     }
 
     // MARK: timing
+
+    func testParentsAreIncludedDedupedAndOrdered() {
+        XCTAssertEqual(FocusFolderRefresher.withParents([""]), [""])
+        XCTAssertEqual(FocusFolderRefresher.withParents(["a"]), ["", "a"])
+        XCTAssertEqual(FocusFolderRefresher.withParents(["a/b/c"]), ["a/b", "a/b/c"])
+        XCTAssertEqual(FocusFolderRefresher.withParents(["a/b", "a/c", "a"]), ["a", "a/b", "a/c", ""])
+        XCTAssertEqual(FocusFolderRefresher.withParents(["", "x y/z"]), ["", "x y", "x y/z"])
+    }
 
     func testRepeatsEveryFifteenSecondsWhileFocused() async throws {
         let client = RefreshRecorder()
@@ -100,13 +107,13 @@ final class FocusFolderRefresherTests: DebugTestCase {
         await r.poll().value
         advance(5); await r.poll().value
         advance(5); await r.poll().value
-        var count = await client.dirs.count
+        var count = await client.calls.count
         XCTAssertEqual(count, 1)
         advance(5); await r.poll().value
-        count = await client.dirs.count
+        count = await client.calls.count
         XCTAssertEqual(count, 2)
         advance(15); await r.poll().value
-        count = await client.dirs.count
+        count = await client.calls.count
         XCTAssertEqual(count, 3)
     }
 
@@ -120,13 +127,13 @@ final class FocusFolderRefresherTests: DebugTestCase {
         advance(1); await r.poll().value
         file.directories = ["/m/a/docs"]
         advance(1); await r.poll().value          // 2 s after the last refresh: debounced
-        var count = await client.dirs.count
+        var count = await client.calls.count
         XCTAssertEqual(count, 1)
         file.directories = []
         advance(1); await r.poll().value
         file.directories = ["/m/a/docs"]
         advance(2); await r.poll().value          // 5 s after: refocus refreshes at once
-        count = await client.dirs.count
+        count = await client.calls.count
         XCTAssertEqual(count, 2)
     }
 
@@ -138,7 +145,7 @@ final class FocusFolderRefresherTests: DebugTestCase {
         await r.poll().value
         file.directories = []
         for _ in 0..<5 { advance(20); await r.poll().value }
-        let count = await client.dirs.count
+        let count = await client.calls.count
         XCTAssertEqual(count, 1)
     }
 
@@ -150,13 +157,13 @@ final class FocusFolderRefresherTests: DebugTestCase {
         await r.poll().value
         r.unregister(remoteID: remoteA)
         advance(30); await r.poll().value
-        var count = await client.dirs.count
+        var count = await client.calls.count
         XCTAssertEqual(count, 1)
         r.register(remoteID: remoteA, mountpoint: "/m/a", client: client)   // registers and polls at once
         try await Task.sleep(nanoseconds: 100_000_000)
         r.stop()
         advance(30); await r.poll().value
-        count = await client.dirs.count
+        count = await client.calls.count
         XCTAssertEqual(count, 2)
     }
 
@@ -171,7 +178,7 @@ final class FocusFolderRefresherTests: DebugTestCase {
         await r.poll().value
         file.corrupt = false; file.missing = true
         await r.poll().value
-        let count = await client.dirs.count
+        let count = await client.calls.count
         XCTAssertEqual(count, 0)
     }
 
@@ -181,9 +188,11 @@ final class FocusFolderRefresherTests: DebugTestCase {
         r.register(remoteID: remoteA, mountpoint: "/m/a", client: client)
         file.directories = (0..<12).map { "/m/a/d\($0)" }
         await r.poll().value
-        let dirs = await client.dirs.compactMap { $0 }
-        XCTAssertEqual(dirs.count, 8)
-        XCTAssertEqual(Set(dirs), Set((4..<12).map { "d\($0)" }))
+        let calls = await client.calls
+        XCTAssertEqual(calls.count, 1, "packed into one call")
+        XCTAssertEqual(calls[0].first, "", "the shared parent (root) comes once")
+        XCTAssertEqual(Set(calls[0].dropFirst()), Set((4..<12).map { "d\($0)" }))
+        XCTAssertEqual(calls[0].count, 9)
     }
 
     func testOneInFlightRefreshPerRemote() async throws {
@@ -198,14 +207,14 @@ final class FocusFolderRefresherTests: DebugTestCase {
         advance(20)
         await r.poll().value                    // busy: nothing new starts
         var dirs = await client.dirs
-        XCTAssertEqual(dirs, ["one"])
+        XCTAssertEqual(dirs, ["", "one"])
         await client.release()
         await first.value
         await client.release()
         advance(1)
         await r.poll().value                    // idle again: one is due (21 s) and two is new
-        dirs = await client.dirs.compactMap { $0 }
-        XCTAssertEqual(Set(dirs), ["one", "two"])
+        dirs = await client.dirs
+        XCTAssertEqual(Array(dirs.dropFirst(2)), ["", "one", "two"])
     }
 
     func testFailuresAreSwallowedAndNotRetriedBeforeTheInterval() async throws {
@@ -216,7 +225,7 @@ final class FocusFolderRefresherTests: DebugTestCase {
         file.directories = ["/m/a/docs"]
         await r.poll().value
         advance(5); await r.poll().value
-        let count = await client.dirs.count
+        let count = await client.calls.count
         XCTAssertEqual(count, 1)
     }
 
@@ -226,15 +235,15 @@ final class FocusFolderRefresherTests: DebugTestCase {
         r.register(remoteID: remoteA, mountpoint: "/m/a", client: client)
         file.directories = ["/m/a/docs"]
         await r.poll().value
-        var count = await client.dirs.count
+        var count = await client.calls.count
         XCTAssertEqual(count, 0)
         r.isEnabled = true                       // polls immediately
         try await Task.sleep(nanoseconds: 100_000_000)
-        count = await client.dirs.count
+        count = await client.calls.count
         XCTAssertEqual(count, 1)
         r.isEnabled = false
         advance(60); await r.poll().value
-        count = await client.dirs.count
+        count = await client.calls.count
         XCTAssertEqual(count, 1)
         r.stop()
     }
@@ -255,7 +264,7 @@ final class FocusFolderRefresherTests: DebugTestCase {
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline, await client.dirs.isEmpty { try await Task.sleep(nanoseconds: 20_000_000) }
         let dirs = await client.dirs
-        XCTAssertEqual(dirs, ["live"])
+        XCTAssertEqual(dirs, ["", "live"])
     }
 
     // MARK: snapshot decoding

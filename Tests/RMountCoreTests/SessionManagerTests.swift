@@ -648,9 +648,9 @@ private actor SessionControlClient: RcloneControlClient {
     var stats = RcloneStats()
     var statsFail = false
     var waiting: CheckedContinuation<Void, Never>?
-    var refreshed: [String?] = []
+    var refreshed: [[String]] = []
     var forgets = 0
-    func vfsRefresh(dir: String?) async throws { refreshed.append(dir) }
+    func vfsRefresh(dirs: [String]) async throws { refreshed.append(dirs) }
     func vfsForgetAll() async throws { forgets += 1 }
     func vfsQueue() async throws -> VFSQueue {
         calls += 1
@@ -1120,12 +1120,12 @@ extension SessionManagerTests {
         focus.directories = ["/Volumes/test/Reports 2024", "/Volumes/other/x"]
         let client = SessionControlClient()
         f.manager.startUploadMonitor(remoteID: remote.id, client: client)
-        try await waitForUploads { await client.refreshed == ["Reports 2024"] }
+        try await waitForUploads { await client.refreshed == [["", "Reports 2024"]] }
         f.manager.shutdownAll()     // stops focus refreshing
         focus.directories = ["/Volumes/test/Later"]
         await refresher.poll().value
         let refreshed = await client.refreshed
-        XCTAssertEqual(refreshed, ["Reports 2024"])
+        XCTAssertEqual(refreshed, [["", "Reports 2024"]])
     }
 
     func testKeepOpenFoldersFreshPreferenceTogglesTheRefresher() async throws {

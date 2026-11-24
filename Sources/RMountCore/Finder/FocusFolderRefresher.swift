@@ -117,15 +117,26 @@ public final class FocusFolderRefresher {
         let token = UUID()
         inFlight[remoteID] = token
         let task = Task { @MainActor [weak self] in
-            for dir in dirs {
-                if Task.isCancelled { break }
-                do { try await client.vfsRefresh(dir: dir.isEmpty ? nil : dir) }
+            // One call: the NFS client takes a folder's mtime from its parent's listing, so the
+            // parent has to be re-read together with the folder or the kernel keeps its old listing.
+            if !Task.isCancelled {
+                do { try await client.vfsRefresh(dirs: Self.withParents(dirs)) }
                 catch { self?.log.debug("vfs/refresh failed (code \((error as NSError).code))") }
             }
             if self?.inFlight[remoteID] == token { self?.inFlight.removeValue(forKey: remoteID); self?.refreshTasks.removeValue(forKey: remoteID) }
         }
         refreshTasks[remoteID] = task
         return task
+    }
+
+    /// Each folder preceded by its parent ("" = root, whose parent is itself), without duplicates.
+    nonisolated static func withParents(_ dirs: [String]) -> [String] {
+        var seen = Set<String>(), result: [String] = []
+        for dir in dirs {
+            let parent = dir.contains("/") ? String(dir[..<dir.lastIndex(of: "/")!]) : ""
+            for path in [parent, dir] where seen.insert(path).inserted { result.append(path) }
+        }
+        return result
     }
 
     // MARK: mapping

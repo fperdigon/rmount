@@ -75,16 +75,17 @@ public struct UploadStatus: Equatable {
 public protocol RcloneControlClient {
     func vfsQueue() async throws -> VFSQueue
     func coreStats() async throws -> RcloneStats
-    /// `vfs/refresh` for one directory, relative to the remote root (nil = the root itself).
-    /// Not recursive. rclone only accepts string values and takes the root when no `dir` is given.
-    func vfsRefresh(dir: String?) async throws
+    /// `vfs/refresh` for several directories relative to the remote root ("" = the root itself).
+    /// Not recursive. Non-root paths go in one call as dir, dir2, dir3...; the root has no name in
+    /// rclone, so it is its own call with no parameters (rclone only accepts string values).
+    func vfsRefresh(dirs: [String]) async throws
     /// `vfs/forget` with no paths: drops the whole directory cache; listings are re-read lazily.
     func vfsForgetAll() async throws
 }
 
 public extension RcloneControlClient {
     func coreStats() async throws -> RcloneStats { throw URLError(.unsupportedURL) }
-    func vfsRefresh(dir: String?) async throws { throw URLError(.unsupportedURL) }
+    func vfsRefresh(dirs: [String]) async throws { throw URLError(.unsupportedURL) }
     func vfsForgetAll() async throws { throw URLError(.unsupportedURL) }
 }
 
@@ -112,8 +113,13 @@ public struct URLSessionRcloneControlClient: RcloneControlClient {
         return try await perform(statsRequest, as: RcloneStats.self)
     }
 
-    public func vfsRefresh(dir: String?) async throws {
-        try await post("vfs/refresh", body: dir.map { ["dir": $0] } ?? [:])
+    public func vfsRefresh(dirs: [String]) async throws {
+        if dirs.contains("") { try await post("vfs/refresh", body: [:]) }
+        let named = dirs.filter { !$0.isEmpty }
+        guard !named.isEmpty else { return }
+        var body: [String: String] = [:]
+        for (index, dir) in named.enumerated() { body[index == 0 ? "dir" : "dir\(index + 1)"] = dir }
+        try await post("vfs/refresh", body: body)
     }
 
     public func vfsForgetAll() async throws {

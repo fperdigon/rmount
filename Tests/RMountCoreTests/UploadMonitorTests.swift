@@ -142,18 +142,22 @@ final class UploadMonitorTests: DebugTestCase {
             return (200, Data("{}".utf8))
         }
         let client = URLSessionRcloneControlClient(port: 43210, user: "u", password: "p", session: session)
-        try await client.vfsRefresh(dir: "My Docs/ñ")
-        try await client.vfsRefresh(dir: nil)
+        try await client.vfsRefresh(dirs: ["My Docs/ñ"])
+        try await client.vfsRefresh(dirs: [""])
+        try await client.vfsRefresh(dirs: [])
+        try await client.vfsRefresh(dirs: ["", "a b"])
         try await client.vfsForgetAll()
-        XCTAssertEqual(seen.map(\.0), ["http://127.0.0.1:43210/vfs/refresh", "http://127.0.0.1:43210/vfs/refresh", "http://127.0.0.1:43210/vfs/forget"])
-        XCTAssertEqual(seen.map(\.1), [#"{"dir":"My Docs\/ñ"}"#, "{}", "{}"])
+        let refresh = "http://127.0.0.1:43210/vfs/refresh"
+        XCTAssertEqual(seen.map(\.0), [refresh, refresh, refresh, refresh, "http://127.0.0.1:43210/vfs/forget"])
+        // The root has no name in rclone: it is a call without parameters, then the named folders in one call.
+        XCTAssertEqual(seen.map(\.1), [#"{"dir":"My Docs\/ñ"}"#, "{}", "{}", #"{"dir":"a b"}"#, "{}"])
         ControlURLProtocol.handler = { _ in (500, Data()) }
         do { try await client.vfsForgetAll(); XCTFail("Expected rejected response") }
         catch { XCTAssertEqual((error as? URLError)?.code, .badServerResponse) }
     }
 
     func testClientsWithoutRefreshSupportThrow() async {
-        do { try await FakeControlClient().vfsRefresh(dir: nil); XCTFail("Expected unsupported") }
+        do { try await FakeControlClient().vfsRefresh(dirs: [""]); XCTFail("Expected unsupported") }
         catch { XCTAssertEqual((error as? URLError)?.code, .unsupportedURL) }
         do { try await FakeControlClient().vfsForgetAll(); XCTFail("Expected unsupported") }
         catch { XCTAssertEqual((error as? URLError)?.code, .unsupportedURL) }
