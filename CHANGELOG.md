@@ -32,6 +32,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - The Finder badge snapshot now carries a schema version, and the extension ignores snapshots from a newer app.
+- After an update, RMount now relaunches only once the old copy has quit, so a second copy no longer starts.
 
 ## [0.2.0] — 2026-11-22
 
