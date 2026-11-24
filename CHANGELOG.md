@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- After an update, RMount now relaunches only once the old copy has quit, so a second copy no longer starts.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed

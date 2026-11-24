@@ -207,9 +207,23 @@ final class UpdateInstallerTests: DebugTestCase {
     }
 
     func testRelaunchCommandQuotesThePath() {
-        let p = UpdateInstaller.relaunchProcess(appURL: URL(fileURLWithPath: "/Applications/it's here/rmount.app"))
+        let p = UpdateInstaller.relaunchProcess(appURL: URL(fileURLWithPath: "/Applications/it's here/rmount.app"), pid: 4242)
         XCTAssertEqual(p.executableURL?.path, "/bin/sh")
-        XCTAssertEqual(p.arguments, ["-c", "sleep 1; /usr/bin/open -n '/Applications/it'\\''s here/rmount.app'"])
+        XCTAssertEqual(p.arguments, ["-c", "i=0; while kill -0 4242 2>/dev/null && [ $i -lt 150 ]; do sleep 0.2; i=$((i+1)); done; /usr/bin/open '/Applications/it'\\''s here/rmount.app'"])
+        XCTAssertFalse(p.arguments![1].contains("open -n"), "must not force a second instance")
+    }
+
+    func testRelaunchDefaultsToThisProcessAndRunsOpenAfterWaiting() throws {
+        let p = UpdateInstaller.relaunchProcess(appURL: URL(fileURLWithPath: "/x/rmount.app"))
+        XCTAssertTrue(p.arguments![1].contains("kill -0 \(ProcessInfo.processInfo.processIdentifier) "))
+        // The waiting loop returns at once for a pid that does not exist, so the script reaches `open`.
+        let script = UpdateInstaller.relaunchProcess(appURL: URL(fileURLWithPath: "/x/rmount.app"), pid: 2_000_000_000)
+            .arguments![1].replacingOccurrences(of: "/usr/bin/open", with: "echo")
+        let out = Pipe(); let sh = Process()
+        sh.executableURL = URL(fileURLWithPath: "/bin/sh"); sh.arguments = ["-c", script]; sh.standardOutput = out
+        try sh.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), "/x/rmount.app\n")
     }
 
     func testErrorsAreReadable() {

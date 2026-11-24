@@ -156,12 +156,14 @@ public enum UpdateInstaller {
         return target
     }
 
-    /// A detached process that waits for this app to quit, then opens the (new) app.
-    public static func relaunchProcess(appURL: URL) -> Process {
+    /// A detached process that waits for the old process (`pid`) to exit, then opens the (new) app.
+    /// The wait is bounded (about 30 s), and `open` runs without `-n` so a copy that is still
+    /// alive is reused instead of a second one being started.
+    public static func relaunchProcess(appURL: URL, pid: Int32 = ProcessInfo.processInfo.processIdentifier) -> Process {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         let path = appURL.path.replacingOccurrences(of: "'", with: "'\\''")
-        p.arguments = ["-c", "sleep 1; /usr/bin/open -n '\(path)'"]
+        p.arguments = ["-c", "i=0; while kill -0 \(pid) 2>/dev/null && [ $i -lt 150 ]; do sleep 0.2; i=$((i+1)); done; /usr/bin/open '\(path)'"]
         return p
     }
 
