@@ -92,6 +92,11 @@ environment without macOS, open a PR and let CI be the judge.
 - This repo is a fork of `AyonPal/macsh`, and `gh pr create` defaults to the upstream parent. Always pass
   `--repo fperdigon/rmount` (and `--base`/`--head`) to `gh pr create`, `gh pr view`, `gh pr merge`, and check the URL it
   prints. A PR opened upstream by mistake must be closed at once with a short apology.
+- CI limits (GitHub Free): 5 concurrent macOS jobs, 20 jobs in all. Draft PRs run no macOS jobs and docs-only
+  changes skip them; each full run is up to 5 macOS jobs (`build-test`, then 4 in parallel). Agents opening several
+  PRs open them as drafts, combine work for testing on one integration branch/PR, and mark PRs ready one or two
+  at a time; never start more than ~2 full CI runs at once. If GitHub-hosted macOS runners are unavailable, say so
+  and ask the maintainer (no local runners are set up).
 - Stacked PRs: base a PR on the branch it depends on (`--base <branch>`); GitHub retargets it to `main` when that
   branch merges. Merge them in order.
 - Do not commit `AGENTS.md` edits that are not yours: stage files by name (`git add <paths>`), never `git add -A`.
