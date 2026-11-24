@@ -95,6 +95,13 @@ final class FinderSync: FIFinderSync {
                 data = try JSONEncoder().encode(FinderBadgeSnapshot(roots: [], items: [], writtenAt: 0))
             }
             guard data != lastData else { return }
+            // A newer app may write a layout this extension cannot read: keep the last valid snapshot.
+            guard FinderBadgeSnapshot.isSupported(data: data) else {
+                let message = "unsupported snapshot schemaVersion \(FinderBadgeSnapshot.schemaVersion(of: data))"
+                if message != lastError { Trace.event("extension reload error=\(message); retaining last valid snapshot") }
+                lastError = message
+                return
+            }
             let snapshot = try JSONDecoder().decode(FinderBadgeSnapshot.self, from: data).validated()
             let nextRoots = Set(snapshot.roots.map { URL(fileURLWithPath: $0, isDirectory: true) })
             let next = Dictionary(uniqueKeysWithValues: snapshot.items.map { ($0.path, $0.badgeIdentifier) })

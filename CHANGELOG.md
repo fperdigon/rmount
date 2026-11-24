@@ -29,6 +29,9 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 
 - The bundled rclone is now a pinned version (v1.76.0) whose SHA-256 is checked at build time; the build fails on a mismatch.
+### Changed
+
+- The Finder badge snapshot now carries a schema version, and the extension ignores snapshots from a newer app.
 
 ## [0.2.0] — 2026-11-22
 
