@@ -92,6 +92,10 @@ environment without macOS, open a PR and let CI be the judge.
 - This repo is a fork of `AyonPal/macsh`, and `gh pr create` defaults to the upstream parent. Always pass
   `--repo fperdigon/rmount` (and `--base`/`--head`) to `gh pr create`, `gh pr view`, `gh pr merge`, and check the URL it
   prints. A PR opened upstream by mistake must be closed at once with a short apology.
+- CI jobs cancelled with zero steps (no runner was available) are retried automatically by `ci-retry.yml`
+  (max 20 attempts); a job with a failed step is never retried.
+- Auto-merge is enabled on the repo: `gh pr merge <n> --repo fperdigon/rmount --auto --merge` merges a PR when the
+  required checks pass. Those are only `build-test` and `app-build`, so check the integration jobs yourself first.
 - CI limits (GitHub Free): 5 concurrent macOS jobs, 20 jobs in all. Draft PRs run no macOS jobs and docs-only
   changes skip them; each full run is up to 5 macOS jobs (`build-test`, then 4 in parallel). Agents opening several
   PRs open them as drafts, combine work for testing on one integration branch/PR, and mark PRs ready one or two
