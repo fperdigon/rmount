@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- The bundled rclone is now a pinned version (v1.76.0) whose SHA-256 is checked at build time; the build fails on a mismatch.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed
