@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Unmount no longer force-unmounts a volume that is in use: it says so and offers Force Unmount.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed

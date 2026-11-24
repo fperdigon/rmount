@@ -7,6 +7,8 @@ public class Mounter {
         case mountpointCreationFailed(String)
         case mountFailed(stderr: String, exitCode: Int32)
         case unmountFailed(stderr: String, exitCode: Int32)
+        /// The volume is in use (open files, a Finder window); a plain unmount was refused.
+        case busy(mountpoint: String)
         case netFSFailed(status: Int32)
 
         public var errorDescription: String? {
@@ -17,6 +19,8 @@ public class Mounter {
                 return "mount failed (exit \(code)): \(stderr.isEmpty ? "no stderr output" : stderr)"
             case .unmountFailed(let stderr, let code):
                 return "unmount failed (exit \(code)): \(stderr.isEmpty ? "no stderr output" : stderr)"
+            case .busy(let mp):
+                return "\(mp) is in use by an app or Finder, so it was not unmounted."
             case .netFSFailed(let status):
                 return "NetFS mount failed (status \(status))"
             }
@@ -287,11 +291,14 @@ public class Mounter {
         }
     }
 
-    /// Calls `diskutil unmount <mountpoint>`. Falls back to `unmount force` on failure.
+    /// Calls `diskutil unmount <mountpoint>`. A refusal because the volume is in use throws
+    /// `MountError.busy` so the caller can ask the user; it never forces on its own. With
+    /// `force` (quit, remote deletion, the user's "Force Unmount") it uses `unmount force`.
     ///
     /// Unmounting something that is already gone (ejected in Finder, rclone killed, mount
     /// cleaned up by another run) is a success, not an error.
-    public func unmount(mountpoint: String) throws {
+    public func unmount(mountpoint: String, force: Bool = false) throws {
+        if force { return try forceUnmount(mountpoint: mountpoint) }
         guard isMounted(mountpoint: mountpoint) else { return }
         do {
             try run(
@@ -299,13 +306,16 @@ public class Mounter {
                 args: ["unmount", mountpoint],
                 failure: MountError.unmountFailed
             )
-        } catch {
-            try run(
-                "/usr/sbin/diskutil",
-                args: ["unmount", "force", mountpoint],
-                failure: MountError.unmountFailed
-            )
+        } catch MountError.unmountFailed(let stderr, let code) {
+            if Self.isBusyFailure(stderr) { throw MountError.busy(mountpoint: mountpoint) }
+            throw MountError.unmountFailed(stderr: stderr, exitCode: code)
         }
+    }
+
+    /// True when diskutil's message says the volume could not be unmounted because it is in use.
+    static func isBusyFailure(_ stderr: String) -> Bool {
+        let s = stderr.lowercased()
+        return s.contains("busy") || s.contains("dissented") || s.contains("in use")
     }
 
     /// `diskutil unmount force`, for mounts whose server is gone. No-op if not mounted.

@@ -639,8 +639,10 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    /// Unmounts a remote without blocking the main thread.
-    public func unmount(remoteID: UUID) async throws {
+    /// Unmounts a remote without blocking the main thread. Throws `Mounter.MountError.busy`
+    /// (session left mounted) when the volume is in use; call again with `force: true` once
+    /// the user agrees.
+    public func unmount(remoteID: UUID, force: Bool = false) async throws {
         guard let session = sessions.first(where: { $0.id == remoteID }) else { return }
         switch session.status {
         case .starting, .stopping: return
@@ -652,7 +654,7 @@ public final class SessionManager: ObservableObject {
         session.transition(to: .stopping)
         if let mp = session.mountpoint {
             let mounter = self.mounter
-            do { try await Self.offMain { try mounter.unmount(mountpoint: mp) } }
+            do { try await Self.offMain { try mounter.unmount(mountpoint: mp, force: force) } }
             catch {
                 session.transition(to: previous)    // still mounted (e.g. busy)
                 throw error
@@ -668,7 +670,7 @@ public final class SessionManager: ObservableObject {
         retryTasks[remoteID]?.cancel()
         retryTasks[remoteID] = nil
         if let mp = session.mountpoint {
-            try mounter.unmount(mountpoint: mp)
+            try mounter.unmount(mountpoint: mp, force: true)
         }
         finishUnmount(session)
     }

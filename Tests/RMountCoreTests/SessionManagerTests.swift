@@ -8,6 +8,8 @@ private final class FakeMounter: Mounter {
     private var _webdavMounts: [(port: Int, baseurl: String)] = []
     private var _nfsMounts: [(port: Int, mountpoint: String)] = []
     private var _unmounted: [String] = []
+    private var _forced: [Bool] = []
+    private var _busy = false
     private var _reconciled: [String] = []
 
     var failMount: Bool {
@@ -17,6 +19,12 @@ private final class FakeMounter: Mounter {
     var webdavMounts: [(port: Int, baseurl: String)] { lock.withLock { _webdavMounts } }
     var nfsMounts: [(port: Int, mountpoint: String)] { lock.withLock { _nfsMounts } }
     var unmounted: [String] { lock.withLock { _unmounted } }
+    var forced: [Bool] { lock.withLock { _forced } }
+    /// When set, a non-forced unmount throws `.busy` like a volume with open files.
+    var busy: Bool {
+        get { lock.withLock { _busy } }
+        set { lock.withLock { _busy = newValue } }
+    }
     var reconciled: [String] { lock.withLock { _reconciled } }
 
     override func mountWebDAV(host: String, port: Int, baseurl: String, user: String, password: String) throws -> String {
@@ -34,7 +42,10 @@ private final class FakeMounter: Mounter {
 
     override func reconcileLeftoverNFSMounts() -> [String] { [] }
 
-    override func unmount(mountpoint: String) throws { lock.withLock { _unmounted.append(mountpoint) } }
+    override func unmount(mountpoint: String, force: Bool = false) throws {
+        if busy && !force { throw Mounter.MountError.busy(mountpoint: mountpoint) }
+        lock.withLock { _unmounted.append(mountpoint); _forced.append(force) }
+    }
 
     @discardableResult
     override func reconcileStaleMount(volumeName: String) -> Bool {
@@ -520,6 +531,36 @@ final class SessionManagerTests: DebugTestCase {
 
         XCTAssertEqual(f.manager.sessions[0].status, .idle)
         XCTAssertEqual(f.mounter.unmounted.count, 1)
+    }
+
+    func testBusyUnmountThrowsAndKeepsSessionMountedThenForceSucceeds() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        try await f.manager.mount(remoteID: r.id)
+        f.mounter.busy = true
+
+        let err = await thrownError { try await f.manager.unmount(remoteID: r.id) }
+        guard case .busy? = err as? Mounter.MountError else { return XCTFail("expected busy, got \(String(describing: err))") }
+        if case .mounted = f.manager.sessions[0].status {} else { XCTFail("still mounted expected") }
+        XCTAssertTrue(f.mounter.unmounted.isEmpty, "a plain unmount must not force")
+
+        try await f.manager.unmount(remoteID: r.id, force: true)
+        XCTAssertEqual(f.manager.sessions[0].status, .idle)
+        XCTAssertEqual(f.mounter.forced, [true])
+    }
+
+    func testQuitForcesUnmountEvenWhenBusy() async throws {
+        let f = try makeFixture()
+        let r = makeRemote(backend: s3Backend())
+        try f.manager.add(r, s3Secrets: S3Secrets(accessKeyID: "AK", secretAccessKey: "SK"))
+        try await f.manager.mount(remoteID: r.id)
+        f.mounter.busy = true
+
+        f.manager.shutdownAll()
+
+        XCTAssertEqual(f.manager.sessions[0].status, .idle)
+        XCTAssertEqual(f.mounter.forced, [true])
     }
 
     func testDeleteMountedRemoteUnmountsFirst() async throws {
