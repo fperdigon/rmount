@@ -22,6 +22,10 @@ public final class SessionManager: ObservableObject {
     private let logsDir: URL
     /// Parent of the per-remote rclone VFS cache directories (`<cacheRoot>/<remote UUID>`).
     private let cacheRoot: URL
+    /// rclone's default shared cache, where pre-migration uploads may still wait.
+    private let legacyCacheRoot: URL
+    /// Remotes mounted on the legacy cache; each moves to its own dir after a mount with no pending uploads.
+    private var legacyCacheMounts: Set<UUID> = []
     private let rcloneBinary: URL
     private let hostKeyVerifier: HostKeyVerifier?
 
@@ -37,6 +41,7 @@ public final class SessionManager: ObservableObject {
         mounter: Mounter,
         logsDir: URL,
         cacheRoot: URL? = nil,
+        legacyCacheRoot: URL? = nil,
         rcloneBinary: URL,
         hostKeyVerifier: HostKeyVerifier? = nil,
         preferences: UserPreferences = UserPreferences(),
@@ -51,6 +56,7 @@ public final class SessionManager: ObservableObject {
         self.mounter = mounter
         self.logsDir = logsDir
         self.cacheRoot = cacheRoot ?? logsDir.deletingLastPathComponent().appendingPathComponent("cache", isDirectory: true)
+        self.legacyCacheRoot = legacyCacheRoot ?? LegacyVFSCache.defaultRoot
         self.rcloneBinary = rcloneBinary
         self.hostKeyVerifier = hostKeyVerifier
         self.controlClient = controlClient
@@ -120,6 +126,9 @@ public final class SessionManager: ObservableObject {
         uploadMonitors[remoteID] = UploadMonitor(client: client) { [weak self] status in
             guard let self, self.uploadGenerations[remoteID] == generation else { return }
             self.uploadStatus[remoteID] = status
+            if !status.hasPending, !status.isStale, self.legacyCacheMounts.contains(remoteID) {
+                self.markCacheMigrated(remoteID)
+            }
             if let session = self.sessions.first(where: { $0.id == remoteID }) {
                 self.finderBadgeTracker.sync(remoteID: remoteID, remoteName: session.remote.name,
                                             mountpoint: session.mountpoint, status: status)
@@ -330,6 +339,30 @@ public final class SessionManager: ObservableObject {
         // Keep the cache when uploads were still pending: it holds the only copy of those files.
         if !hadPendingUploads { try? FileManager.default.removeItem(at: cacheDir(for: remoteID)) }
         try reload()
+    }
+
+    /// `--cache-dir` for this mount. A remote saved before per-remote caches keeps rclone's old shared
+    /// cache (no flag) while that cache may still hold its entries, so no pending upload is stranded;
+    /// otherwise it switches to its own dir at once. The old cache is never deleted.
+    private func cacheArgs(for remote: Remote, remotePath: String) -> [String] {
+        if !remote.cacheMigrated {
+            if LegacyVFSCache.hasEntries(root: legacyCacheRoot, remotePath: remotePath) {
+                legacyCacheMounts.insert(remote.id)
+                return []
+            }
+            markCacheMigrated(remote.id)
+        }
+        return MountOptions.cacheDirArgs(cacheDir(for: remote.id))
+    }
+
+    /// Persists that the remote uses its own cache dir (from the next mount on).
+    func markCacheMigrated(_ remoteID: UUID) {
+        legacyCacheMounts.remove(remoteID)
+        guard var all = try? store.load(), let i = all.firstIndex(where: { $0.id == remoteID }),
+              !all[i].cacheMigrated else { return }
+        all[i].cacheMigrated = true
+        guard (try? store.save(all)) != nil else { return }
+        sessions.first(where: { $0.id == remoteID })?.remote.cacheMigrated = true
     }
 
     /// rclone's own VFS cache directory for one remote, never shared with another remote or
@@ -578,7 +611,7 @@ public final class SessionManager: ObservableObject {
             let logURL = logsDir.appendingPathComponent("\(remote.id.uuidString).log")
             let tuning = remote.effectiveTuning
             let extraArgs = MountOptions.serveArgs(readOnly: remote.readOnly, bandwidthLimit: remote.bandwidthLimit)
-                + MountOptions.cacheDirArgs(cacheDir(for: remote.id))
+                + cacheArgs(for: remote, remotePath: remotePath)
             let runner = RcloneProcess(binary: rcloneBinary, logFile: logURL)
             let volname = mounter.volumeName(from: remote.name)
             let spawned: RcloneProcess.Spawned
