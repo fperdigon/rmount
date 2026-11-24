@@ -768,10 +768,10 @@ public final class SessionManager: ObservableObject {
                 return await finishCancelled()
             }
             stopUploadMonitor(remoteID: remoteID)
+            // rclone's own explanation (bad key, auth failure, ...) only goes to its log, and
+            // only if rclone was started in this attempt (else the log is the previous run's).
+            let reason = Self.failureReason(error, logFile: attempt.process != nil ? logFile : nil)
             await rollback()
-            var reason = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
-            // rclone's own explanation (bad key, auth failure, ...) only goes to its log.
-            if let tail = Self.logTail(of: logFile) { reason += "\n" + tail }
             session.transition(to: .failed(reason: reason))
             throw error
         }
@@ -972,6 +972,13 @@ public final class SessionManager: ObservableObject {
 
     public func logURL(for remoteID: UUID) -> URL {
         logsDir.appendingPathComponent("\(remoteID.uuidString).log")
+    }
+
+    /// The error text, with the log tail appended when `logFile` is given (rclone ran this attempt).
+    static func failureReason(_ error: Error, logFile: URL?) -> String {
+        var reason = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+        if let logFile, let tail = logTail(of: logFile) { reason += "\n" + tail }
+        return reason
     }
 
     /// Last `lines` non-empty lines of an rclone log, or nil if it is missing/empty.

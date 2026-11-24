@@ -71,4 +71,12 @@ final class ClearErrorTests: DebugTestCase {
         let p = try write("empty.log", "\n\n")
         XCTAssertNil(SessionManager.logTail(of: URL(fileURLWithPath: p)))
     }
+
+    func testFailureReasonOmitsStaleTailWhenRcloneNotSpawned() throws {
+        let p = try write("old.log", "previous session error\n")
+        let err = HostKeyError.rejectedByUser
+        XCTAssertEqual(SessionManager.failureReason(err, logFile: nil), "Host key was not accepted")
+        XCTAssertEqual(SessionManager.failureReason(err, logFile: URL(fileURLWithPath: p)),
+                       "Host key was not accepted\nprevious session error")
+    }
 }
