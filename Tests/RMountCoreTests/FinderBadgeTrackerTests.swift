@@ -104,6 +104,43 @@ final class FinderBadgeTrackerTests: DebugTestCase {
     }
 
     @MainActor
+    func testCapEvictsDoneOldestFirstWithManyOverflowingTransfers() {
+        var now = Date(timeIntervalSince1970: 1000)
+        let tracker = FinderBadgeTracker(writer: RecordingBadgeWriter(), limit: 4, clock: { now }), id = UUID()
+        func sync(_ names: [String]) { tracker.sync(remoteID: id, remoteName: "T", mountpoint: "/m", status: UploadStatus(transfers: names.map { transfer($0) })) }
+        sync(["a", "b"]); sync([]); sync([])           // a, b done at t=1000
+        now.addTimeInterval(1)
+        sync(["c", "d"]); sync([]); sync([])           // c, d done at t=1001
+        now.addTimeInterval(1)
+        sync(["e", "f", "g"])                          // 3 new into a full cap: evicts a, b, c in order
+        XCTAssertEqual(tracker.snapshot.items.map(\.path), ["/m/d", "/m/e", "/m/f", "/m/g"])
+        sync(["e", "f", "g", "h"])                     // d evicted, active never evicted
+        XCTAssertEqual(tracker.snapshot.items.map(\.path), ["/m/e", "/m/f", "/m/g", "/m/h"])
+        sync(["e", "f", "g", "h", "i"])                // full of active items: new one dropped
+        XCTAssertEqual(tracker.snapshot.items.count, 4)
+    }
+
+    @MainActor
+    func testTenThousandQueuedItemsSyncQuickly() {
+        let tracker = FinderBadgeTracker(writer: RecordingBadgeWriter(), limit: 10_000), id = UUID()
+        let all = (0..<10_000).map { transfer("f\($0)") }
+        let start = Date()
+        tracker.sync(remoteID: id, remoteName: "T", mountpoint: "/m", status: UploadStatus(queuedCount: all.count, transfers: all))
+        tracker.sync(remoteID: id, remoteName: "T", mountpoint: "/m", status: UploadStatus(queuedCount: all.count, transfers: all))
+        XCTAssertEqual(tracker.snapshot.items.count, 10_000)
+        // Near-linear work takes well under a second; the old quadratic scan took far longer.
+        XCTAssertLessThan(Date().timeIntervalSince(start), 10)
+        // Full of done items: every new transfer evicts one without a rescan.
+        tracker.sync(remoteID: id, remoteName: "T", mountpoint: "/m", status: UploadStatus())
+        tracker.sync(remoteID: id, remoteName: "T", mountpoint: "/m", status: UploadStatus())
+        let fresh = (0..<10_000).map { transfer("n\($0)") }
+        let start2 = Date()
+        tracker.sync(remoteID: id, remoteName: "T", mountpoint: "/m", status: UploadStatus(queuedCount: fresh.count, transfers: fresh))
+        XCTAssertLessThan(Date().timeIntervalSince(start2), 10)
+        XCTAssertTrue(tracker.snapshot.items.allSatisfy { $0.path.hasPrefix("/m/n") })
+    }
+
+    @MainActor
     func testDisablingClearsAndMountpointChangeReplacesOldPaths() {
         let writer = RecordingBadgeWriter()
         let tracker = FinderBadgeTracker(writer: writer, isEnabled: false), id = UUID()

@@ -115,7 +115,7 @@ public final class SessionManager: ObservableObject {
         uploadGenerations[remoteID] = generation
         uploadMonitors[remoteID] = UploadMonitor(client: client) { [weak self] status in
             guard let self, self.uploadGenerations[remoteID] == generation else { return }
-            self.uploadStatus[remoteID] = status
+            if self.uploadStatus[remoteID] != status { self.uploadStatus[remoteID] = status }
             if let session = self.sessions.first(where: { $0.id == remoteID }) {
                 self.finderBadgeTracker.sync(remoteID: remoteID, remoteName: session.remote.name,
                                             mountpoint: session.mountpoint, status: status)
