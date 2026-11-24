@@ -309,7 +309,7 @@ public final class SessionManager: ObservableObject {
         retryTasks[remoteID] = nil
         if let attempt = mountAttempts[remoteID] { abort(attempt, unmountBlocking: true) }
         if let session = sessions.first(where: { $0.id == remoteID }), case .mounted = session.status {
-            try? await unmount(remoteID: remoteID)
+            try? await unmount(remoteID: remoteID, force: true)
         }
         try? keychain.delete(remoteID: remoteID, kind: .password)
         try? keychain.delete(remoteID: remoteID, kind: .keyPassphrase)
