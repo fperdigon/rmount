@@ -128,7 +128,7 @@ public final class SessionManager: ObservableObject {
         uploadGenerations[remoteID] = generation
         uploadMonitors[remoteID] = UploadMonitor(client: client) { [weak self] status in
             guard let self, self.uploadGenerations[remoteID] == generation else { return }
-            self.uploadStatus[remoteID] = status
+            if self.uploadStatus[remoteID] != status { self.uploadStatus[remoteID] = status }
             if !status.hasPending, !status.isStale, self.legacyCacheMounts.contains(remoteID) {
                 self.markCacheMigrated(remoteID)
             }

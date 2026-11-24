@@ -70,13 +70,16 @@ public final class FinderBadgeTracker {
                 }
                 remote.items[path] = entry
             }
+            // Done entries, oldest first. Computed once per sync: entries inserted below are never done.
+            let evictionOrder = remote.items.filter { $0.value.completedAt != nil }.sorted {
+                if $0.value.completedAt == $1.value.completedAt { return $0.key < $1.key }
+                return $0.value.completedAt! < $1.value.completedAt!
+            }.map(\.key)
+            var evictionIndex = 0
             for (path, transfer) in transfers {
-                if remote.items[path] == nil, remote.items.count >= limit {
-                    let oldestDone = remote.items.filter { $0.value.completedAt != nil }.min {
-                        if $0.value.completedAt == $1.value.completedAt { return $0.key < $1.key }
-                        return $0.value.completedAt! < $1.value.completedAt!
-                    }?.key
-                    if let oldestDone { remote.items.removeValue(forKey: oldestDone) }
+                if remote.items[path] == nil, remote.items.count >= limit, evictionIndex < evictionOrder.count {
+                    remote.items.removeValue(forKey: evictionOrder[evictionIndex])
+                    evictionIndex += 1
                 }
                 guard remote.items[path] != nil || remote.items.count < limit else { continue }
                 var entry = remote.items[path] ?? Entry(state: .waiting)
