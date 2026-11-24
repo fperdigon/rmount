@@ -91,6 +91,7 @@ public final class RcloneProcess {
         let configURL = tmpDir.appendingPathComponent("rclone.conf")
         do { try configText.write(to: configURL, atomically: true, encoding: .utf8) }
         catch { throw SpawnError.failedToWriteConfig(error) }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
 
         let port = try Self.findFreePort()
         var rcPort = try Self.findFreePort()

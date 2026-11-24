@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- If rclone exits unexpectedly, a refreshed sign-in token is now saved before its temporary config is deleted, and leftover temporary configs and decrypted keys from a crash are removed at launch.
+
 ## [0.2.0] — 2026-11-22
 
 ### Changed

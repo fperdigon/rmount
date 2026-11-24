@@ -724,14 +724,35 @@ public final class SessionManager: ObservableObject {
             _ = try? await Self.offMain { try mounter.forceUnmount(mountpoint: mp) }
         }
         if let url = session.ephemeralKeyURL { try? FileManager.default.removeItem(at: url) }
+        // rclone is gone, so its config is final: keep a refreshed token, then delete the temp dir.
+        persistRefreshedSecrets(session)
         session.mountpoint = nil
         session.ephemeralKeyURL = nil
+        session.rcloneConfigURL = nil
         var reason = "rclone stopped unexpectedly (exit \(status)); the mount was removed"
         if let tail = Self.logTail(of: logsDir.appendingPathComponent("\(session.id.uuidString).log")) {
             reason += "\n" + tail
         }
         session.transition(to: .failed(reason: reason))
         if session.remote.autoMount { scheduleMount(remoteID: session.id, attempt: 0) }
+    }
+
+    /// Removes `rmount-rclone-*` dirs and `rmount-key-*` files left in the temp dir by a crash or
+    /// force-quit (they hold a plaintext config or a decrypted key). Call once at launch, before
+    /// mounting; items used by a live session here are kept.
+    @discardableResult
+    public func sweepStaleTempItems(in dir: URL = FileManager.default.temporaryDirectory) -> Int {
+        var keep = Set<String>()
+        for s in sessions {
+            if let c = s.rcloneConfigURL { keep.insert(c.deletingLastPathComponent().lastPathComponent) }
+            if let k = s.ephemeralKeyURL { keep.insert(k.lastPathComponent) }
+        }
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        var removed = 0
+        for name in names where (name.hasPrefix("rmount-rclone-") || name.hasPrefix("rmount-key-")) && !keep.contains(name) {
+            if (try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))) != nil { removed += 1 }
+        }
+        return removed
     }
 
     public func shutdownAll() {

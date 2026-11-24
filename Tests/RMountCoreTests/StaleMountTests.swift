@@ -108,6 +108,63 @@ final class RcloneExitWatcherTests: DebugTestCase {
         XCTAssertNil(session.rcloneProcess)
     }
 
+    func testUnexpectedExitPersistsRefreshedTokenAndRemovesTempConfig() async throws {
+        let cfg = RcloneBackendConfig(type: "drive", options: [:], secretOptions: [RcloneSecretOption(name: "token", obscure: false, refreshable: true)], remotePath: "")
+        let remote = Remote(id: UUID(), name: "d", backend: .rclone(cfg), mountProtocol: .nfs, autoMount: false)
+        let keychain = KeychainService(serviceName: "ai.rmount.test")
+        try keychain.set(remoteID: remote.id, kind: .option("token"), value: "OLD")
+        defer { try? keychain.delete(remoteID: remote.id, kind: .option("token")) }
+        let manager = SessionManager(
+            store: RemoteStore(directory: dir), keychain: keychain,
+            mounter: Mounter(mountBase: dir), logsDir: dir.appendingPathComponent("logs"),
+            rcloneBinary: URL(fileURLWithPath: "/usr/bin/true"), finderBadgeTracker: FinderBadgeTracker(writer: NoopFinderBadgeStatusWriter()))
+        let session = RemoteSession(remote: remote)
+        let confDir = dir.appendingPathComponent("rmount-rclone-x", isDirectory: true)
+        try FileManager.default.createDirectory(at: confDir, withIntermediateDirectories: true)
+        let conf = confDir.appendingPathComponent("rclone.conf")
+        try "[r]\ntoken = NEW\n".write(to: conf, atomically: true, encoding: .utf8)
+        let proc = try finishedProcess(status: 9)
+        session.rcloneProcess = proc
+        session.rcloneConfigURL = conf
+        session.mountpoint = dir.path
+        session.transition(to: .mounted(at: dir.path))
+        await manager.handleRcloneExit(session: session, process: proc)
+        XCTAssertEqual(try keychain.get(remoteID: remote.id, kind: .option("token")), "NEW")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: confDir.path))
+        XCTAssertNil(session.rcloneConfigURL)
+    }
+
+    func testSweepRemovesStaleTempItemsOnly() throws {
+        let (manager, _) = makeSession()
+        let fm = FileManager.default
+        let staleDir = dir.appendingPathComponent("rmount-rclone-stale")
+        try fm.createDirectory(at: staleDir, withIntermediateDirectories: true)
+        let staleKey = dir.appendingPathComponent("rmount-key-stale")
+        try "k".write(to: staleKey, atomically: true, encoding: .utf8)
+        let other = dir.appendingPathComponent("unrelated.txt")
+        try "x".write(to: other, atomically: true, encoding: .utf8)
+        XCTAssertEqual(manager.sweepStaleTempItems(in: dir), 2)
+        XCTAssertFalse(fm.fileExists(atPath: staleDir.path))
+        XCTAssertFalse(fm.fileExists(atPath: staleKey.path))
+        XCTAssertTrue(fm.fileExists(atPath: other.path))
+    }
+
+    func testSweepKeepsItemsUsedByALiveSession() throws {
+        let (manager, _) = makeSession()
+        try manager.add(Remote(id: UUID(), name: "live", backend: .ftp(FTPConfig(host: "h", port: 21, user: "u", remotePath: "", tlsMode: .off)), mountProtocol: .nfs, autoMount: false))
+        let session = manager.sessions[0]
+        let fm = FileManager.default
+        let liveDir = dir.appendingPathComponent("rmount-rclone-live", isDirectory: true)
+        try fm.createDirectory(at: liveDir, withIntermediateDirectories: true)
+        let liveKey = dir.appendingPathComponent("rmount-key-live")
+        try "k".write(to: liveKey, atomically: true, encoding: .utf8)
+        session.rcloneConfigURL = liveDir.appendingPathComponent("rclone.conf")
+        session.ephemeralKeyURL = liveKey
+        XCTAssertEqual(manager.sweepStaleTempItems(in: dir), 0)
+        XCTAssertTrue(fm.fileExists(atPath: liveDir.path))
+        XCTAssertTrue(fm.fileExists(atPath: liveKey.path))
+    }
+
     func testIntentionalStopIsIgnored() async throws {
         let (manager, session) = makeSession()
         let proc = try finishedProcess(status: 0)
