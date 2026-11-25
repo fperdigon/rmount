@@ -79,6 +79,13 @@ public struct BanditConfiguration: Equatable {
     /// When exploring: this share picks an arm next to the best, the rest any other arm uniformly.
     public var adjacentShare: Double = 0.7
     public var ewmaAlpha: Double = 0.3
+    /// A reward below this fraction of an arm's mean counts for more (a global drop is not noise).
+    public var dropSurprise: Double = 0.7
+    public var dropWeight: Double = 0.5
+    /// Ageing: when a sample falls far below its own arm's mean (the link may have got slower as a whole), every
+    /// other arm whose mean is higher than that sample is pulled this far toward it, so a stale best arm cannot
+    /// keep reading best. Arms are corrected upward again as soon as they are sampled.
+    public var ageing: Double = 0.5
     /// A batch counts when it lasted at least `minBatchDuration` and either moved `minBatchBytes` (a fast arm
     /// finishes a big batch quickly) or ran for `minLongBatchDuration` (a slow one moves fewer bytes).
     public var minBatchBytes: Int64 = 100_000_000
@@ -217,8 +224,20 @@ public struct TransfersBandit {
 
     // MARK: Learning
 
-    /// Records a finished batch that ran with `arm`. Batches that are too small or short (see `minBatchBytes`), or failed
-    /// for other reasons, are ignored; a rate-limited batch penalises the arm whatever its size.
+    /// Why `record` would ignore this batch (for the debug log), or nil when it counts.
+    public func rejectionReason(for batch: UploadBatch, arm: Int) -> String? {
+        if !arms.contains(arm) { return "arm \(arm) is not in the arm set" }
+        if batch.rateLimited { return nil }
+        if batch.failed { return "failed (not a rate limit)" }
+        if batch.duration < configuration.minBatchDuration { return "too short (\(Int(batch.duration)) s)" }
+        let enough = batch.bytes >= configuration.minBatchBytes
+            || (batch.duration >= configuration.minLongBatchDuration && batch.bytes >= configuration.minLongBatchBytes)
+        return enough ? nil : "too little data (\(batch.bytes / 1_000_000) MB in \(Int(batch.duration)) s)"
+    }
+
+    /// Records a finished slice (or batch) that ran with `arm`. Samples that are too small or short (see
+    /// `rejectionReason`), or failed for other reasons, are ignored; a rate-limited one penalises the arm whatever
+    /// its size. A sample far below its arm's mean also ages the other arms (see `BanditConfiguration.ageing`).
     /// Pass the `bucket` the arm was chosen for; by default it is derived from the batch's average file size.
     public mutating func record(_ batch: UploadBatch, arm: Int, bucket: WorkloadBucket? = nil) {
         guard arms.contains(arm) else { return }
@@ -231,16 +250,21 @@ public struct TransfersBandit {
             s.mean *= configuration.rateLimitFactor
             last = s.mean
         } else {
-            guard !batch.failed, batch.duration >= configuration.minBatchDuration else { return }
-            let enough = batch.bytes >= configuration.minBatchBytes
-                || (batch.duration >= configuration.minLongBatchDuration && batch.bytes >= configuration.minLongBatchBytes)
-            guard enough else { return }
+            guard rejectionReason(for: batch, arm: arm) == nil else { return }
             let reward = Double(batch.bytes) / 1_000_000 / batch.duration
             // Count-weighted: early samples average out, later ones follow the EWMA so a drifting link is tracked
             // while one bad sample cannot dominate.
-            let weight = s.count == 0 ? 1 : max(configuration.ewmaAlpha, 1 / Double(s.count + 1))
+            var weight = s.count == 0 ? 1 : max(configuration.ewmaAlpha, 1 / Double(s.count + 1))
+            let surprised = s.count > 0 && reward < s.mean * configuration.dropSurprise
+            if surprised { weight = max(weight, configuration.dropWeight) }
             s.mean += weight * (reward - s.mean)
             last = reward
+            if surprised {
+                for (key, var other) in b.stats where key != String(arm) && other.count > 0 && other.mean > reward {
+                    other.mean -= configuration.ageing * (other.mean - reward)
+                    b.stats[key] = other
+                }
+            }
         }
         s.count += 1
         b.stats[String(arm)] = s

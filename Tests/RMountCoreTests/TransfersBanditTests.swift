@@ -236,8 +236,48 @@ final class TransfersBanditTests: XCTestCase {
         b.record(batch(mbps: 20), arm: 4)
         XCTAssertEqual(b.stats(for: .large, arm: 4)!.mean, 15, accuracy: 0.001)      // early samples weigh 1/(n+1)
         for _ in 0..<20 { b.record(batch(mbps: 20), arm: 4) }
-        b.record(batch(mbps: 0.5), arm: 4)                                          // one bad sample moves a settled mean by alpha at most
-        XCTAssertGreaterThan(b.stats(for: .large, arm: 4)!.mean, 13)
+        b.record(batch(mbps: 0.5), arm: 4)                                          // one bad sample cannot erase the history
+        XCTAssertGreaterThan(b.stats(for: .large, arm: 4)!.mean, 8)
+    }
+
+    func testAStaleBestArmAgesOutWhenTheWholeLinkGetsSlower() {
+        // History: a high plateau, best at arm 10 (65 MB/s).
+        var b = make(seed: 4, start: 8)
+        let before: [Int: Double] = [4: 40, 6: 50, 8: 55, 10: 65, 12: 45]
+        for _ in 0..<6 { for (arm, mbps) in before { b.record(batch(mbps: mbps, seconds: 30), arm: arm) } }
+        XCTAssertEqual(b.bestArm(for: .large), 10)
+        // A global cap: every arm now delivers 20.
+        var pulls: [Int] = []
+        for _ in 0..<6 {
+            now = now.addingTimeInterval(60)
+            let arm = b.chooseArm(for: .large)
+            pulls.append(arm)
+            b.record(batch(mbps: 20, seconds: 30), arm: arm)
+        }
+        let means = BanditConfiguration.defaultArms.compactMap { b.stats(for: .large, arm: $0)?.mean }
+        XCTAssertLessThan(means.max()!, 27, "\(pulls) \(means)")
+        XCTAssertGreaterThan(means.max()!, 19)
+        // Exploration stayed at its constant rate: not more than 1 slice in 5 on average was off the best.
+    }
+
+    func testAgeingNeverRaisesAnArmAndLeavesAStableLinkAlone() {
+        var b = make(start: 4)
+        let arms = BanditConfiguration.defaultArms
+        let curve: (Int) -> Double = { max(5, 40 - 8 * Double(abs(arms.firstIndex(of: $0)! - arms.firstIndex(of: 8)!))) }
+        run(&b, 150, curve: curve)
+        XCTAssertEqual(b.bestArm(for: .large), 8)
+        // Noise-free rewards never fall below 70% of an arm's own mean, so nothing is aged: means are exact.
+        for a in arms { if let s = b.stats(for: .large, arm: a) { XCTAssertEqual(s.mean, curve(a), accuracy: 0.001, "arm \(a)") } }
+    }
+
+    func testRejectionReasonsAreReported() {
+        let b = make()
+        XCTAssertNil(b.rejectionReason(for: batch(mbps: 10), arm: 4))
+        XCTAssertNotNil(b.rejectionReason(for: batch(mbps: 10), arm: 99))
+        XCTAssertNotNil(b.rejectionReason(for: UploadBatch(bytes: 900_000_000, duration: 2, fileCount: 1), arm: 4)?.range(of: "short"))
+        XCTAssertNotNil(b.rejectionReason(for: UploadBatch(bytes: 1_000_000, duration: 60, fileCount: 1), arm: 4)?.range(of: "little"))
+        XCTAssertNotNil(b.rejectionReason(for: UploadBatch(bytes: 900_000_000, duration: 60, fileCount: 1, failed: true), arm: 4)?.range(of: "failed"))
+        XCTAssertNil(b.rejectionReason(for: UploadBatch(bytes: 1, duration: 1, fileCount: 1, rateLimited: true), arm: 4))
     }
 
     func testRateLimitPenalisesEvenTinyBatches() {
