@@ -45,6 +45,11 @@ final class TransfersBanditTests: XCTestCase {
         XCTAssertEqual(BanditConfiguration.prior(forBackend: "S3"), 8)
         XCTAssertEqual(BanditConfiguration.prior(forBackend: "sftp"), 4)
         XCTAssertEqual(BanditConfiguration.prior(forBackend: "other"), 4)
+        // The type strings the app really passes (BackendDescriptor.type), not just short names.
+        for cloud in ["s3", "azureblob", "b2", "google cloud storage", "drive"] {
+            XCTAssertEqual(BanditConfiguration.prior(forBackend: cloud), 8, cloud)
+        }
+        for other in ["webdav", "smb", "sftp", "ftp"] { XCTAssertEqual(BanditConfiguration.prior(forBackend: other), 4, other) }
     }
 
     func testConvergesOnConcaveCurve() {

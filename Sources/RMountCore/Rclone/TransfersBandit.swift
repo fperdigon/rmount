@@ -112,7 +112,8 @@ public struct BanditConfiguration: Equatable {
     public static func prior(forBackend id: String) -> Int {
         switch id.lowercased() {
         case "sftp", "ftp", "smb": return 4
-        case "s3", "azureblob", "b2", "gcs", "drive": return 8
+        // rclone type strings as the app uses them (`BackendDescriptor.type`): "google cloud storage" has spaces.
+        case "s3", "azureblob", "b2", "gcs", "google cloud storage", "googlecloudstorage", "drive": return 8
         default: return 4
         }
     }
