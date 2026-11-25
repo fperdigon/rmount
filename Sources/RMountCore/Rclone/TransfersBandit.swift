@@ -70,12 +70,14 @@ public struct BanditState: Codable, Equatable {
 }
 
 public struct BanditConfiguration: Equatable {
-    public var arms: [Int] = [2, 4, 8, 12, 16]
+    public var arms: [Int] = BanditConfiguration.defaultArms
     /// Arm used until something was measured; snapped to the nearest arm, and never below `minStartingArm`.
     public var startingArm: Int = 4
     public static let minStartingArm = 4
     /// Exploration never stops: every batch has this chance of trying an adjacent arm of the best.
     public var epsilon: Double = 0.2
+    /// When exploring: this share picks an arm next to the best, the rest any other arm uniformly.
+    public var adjacentShare: Double = 0.7
     public var ewmaAlpha: Double = 0.3
     /// A batch counts when it lasted at least `minBatchDuration` and either moved `minBatchBytes` (a fast arm
     /// finishes a big batch quickly) or ran for `minLongBatchDuration` (a slow one moves fewer bytes).
@@ -83,7 +85,7 @@ public struct BanditConfiguration: Equatable {
     public var minBatchDuration: TimeInterval = 5
     public var minLongBatchDuration: TimeInterval = 20
     /// Even a long batch must have moved this much, or it measured latency, not throughput.
-    public var minLongBatchBytes: Int64 = 5_000_000
+    public var minLongBatchBytes: Int64 = 10_000_000
     /// Until the best arm and each neighbour have this many samples, probe instead of exploiting.
     public var probeSamples: Int = 2
     /// Upper bound on systematic probes per bucket.
@@ -92,7 +94,10 @@ public struct BanditConfiguration: Equatable {
     public var rateLimitFactor: Double = 0.25
     public var smallFileThreshold: Int64 = 8_000_000
 
-    public init(arms: [Int] = [2, 4, 8, 12, 16], startingArm: Int = 4) {
+    /// Fine at the low end (where most links peak) and wide enough for slow, high-latency ones.
+    public static let defaultArms = [1, 2, 3, 4, 6, 8, 10, 12, 16, 24]
+
+    public init(arms: [Int] = BanditConfiguration.defaultArms, startingArm: Int = 4) {
         self.arms = arms.sorted(); self.startingArm = startingArm
     }
 
@@ -109,8 +114,8 @@ public struct BanditConfiguration: Equatable {
 /// Epsilon-greedy bandit choosing rclone's `--transfers` once per upload batch, per remote and workload
 /// bucket. Pure: no I/O, clock and randomness are injected; `TransfersController` wires it to a mount.
 ///
-/// Flow: when the queue goes empty -> busy call `chooseArm(for:)`, apply the value (live via rc `options/set`,
-/// and `--transfers` at the next start), and when the batch finishes call `record(_:arm:)`. A cold start probes
+/// Flow: for every slice of upload time (about a minute) call `chooseArm(for:)`, apply the value (live via rc
+/// `options/set`, and `--transfers` at the next start), and when the slice ends call `record(_:arm:)` with what it moved. A cold start probes
 /// the starting arm and its neighbours first; after that, with a constant probability `epsilon` (1 in 5) it tries
 /// a neighbour of the best arm, otherwise the best. Exploration never stops, so the choice follows the link
 /// when it changes.
@@ -149,9 +154,12 @@ public struct TransfersBandit {
             b.probes += 1
             b.lastExplored = clock()
         } else if configuration.epsilon > 0, random() < configuration.epsilon {
-            let n = neighbours(of: best)
-            if !n.isEmpty {
-                chosen = n[min(Int(random() * Double(n.count)), n.count - 1)]
+            // Mostly a step next to the best arm, sometimes a jump anywhere (a link can change a lot).
+            let near = neighbours(of: best)
+            let far = arms.filter { $0 != best }
+            let pool = (random() < configuration.adjacentShare && !near.isEmpty) ? near : far
+            if !pool.isEmpty {
+                chosen = pool[min(Int(random() * Double(pool.count)), pool.count - 1)]
                 b.lastExplored = clock()
             }
         }
@@ -228,7 +236,10 @@ public struct TransfersBandit {
                 || (batch.duration >= configuration.minLongBatchDuration && batch.bytes >= configuration.minLongBatchBytes)
             guard enough else { return }
             let reward = Double(batch.bytes) / 1_000_000 / batch.duration
-            s.mean = s.count == 0 ? reward : s.mean + configuration.ewmaAlpha * (reward - s.mean)
+            // Count-weighted: early samples average out, later ones follow the EWMA so a drifting link is tracked
+            // while one bad sample cannot dominate.
+            let weight = s.count == 0 ? 1 : max(configuration.ewmaAlpha, 1 / Double(s.count + 1))
+            s.mean += weight * (reward - s.mean)
             last = reward
         }
         s.count += 1

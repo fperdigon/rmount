@@ -39,8 +39,9 @@ final class TransfersBanditTests: XCTestCase {
 
     func testStartsAtSnappedPriorAndPriors() {
         XCTAssertEqual(make(start: 5).bestArm(for: .large), 4)
-        XCTAssertEqual(make(start: 7).bestArm(for: .large), 8)
-        XCTAssertEqual(make(start: 100).bestArm(for: .large), 16)
+        XCTAssertEqual(make(start: 7).bestArm(for: .large), 6)
+        XCTAssertEqual(make(start: 9).bestArm(for: .large), 8)
+        XCTAssertEqual(make(start: 100).bestArm(for: .large), 24)
         XCTAssertEqual(BanditConfiguration.prior(forBackend: "S3"), 8)
         XCTAssertEqual(BanditConfiguration.prior(forBackend: "sftp"), 4)
         XCTAssertEqual(BanditConfiguration.prior(forBackend: "other"), 4)
@@ -56,38 +57,62 @@ final class TransfersBanditTests: XCTestCase {
     func testFastLinkPeaksLow() {
         var b = make(start: 8)
         run(&b, 300) { 50 - 3 * Double($0) }   // sftp-like: fewer is better
-        XCTAssertEqual(b.bestArm(for: .large), 2)
+        XCTAssertEqual(b.bestArm(for: .large), 1)
     }
 
     func testSlowLinkPeaksHigh() {
         var b = make(start: 4)
         run(&b, 400) { 2 + 0.5 * Double($0) }  // s3-like: more is better
-        XCTAssertEqual(b.bestArm(for: .large), 16)
+        XCTAssertEqual(b.bestArm(for: .large), 24)
     }
 
     func testExploresAboutEpsilonOfTheTime() {
         var b = make(start: 8)
+        run(&b, 3) { _ in 20 }                      // past the guarded first slices
         var other = 0
         let n = 4000
-        for _ in 0..<n where b.chooseArm(for: .large) != 8 { other += 1 }
+        let best = b.bestArm(for: .large)
+        for _ in 0..<n where b.chooseArm(for: .large) != best { other += 1 }
         let rate = Double(other) / Double(n)
         XCTAssertEqual(rate, 0.2, accuracy: 0.03)
     }
 
-    func testExplorationIsOnlyAdjacent() {
+    func testExplorationIsMostlyAdjacentAndSometimesAJumpAnywhere() {
         var b = make(start: 8)
-        run(&b, 5) { _ in 10 }
-        let best = b.bestArm(for: .large)
-        let idx = [2, 4, 8, 12, 16].firstIndex(of: best)!
-        let allowed = Set([idx - 1, idx, idx + 1].compactMap { [2, 4, 8, 12, 16].indices.contains($0) ? [2, 4, 8, 12, 16][$0] : nil })
-        for _ in 0..<500 { XCTAssertTrue(allowed.contains(b.chooseArm(for: .large))) }
+        run(&b, 30) { $0 == 8 ? 40 : 10 }
+        XCTAssertEqual(b.bestArm(for: .large), 8)
+        let arms = BanditConfiguration.defaultArms
+        var adjacent = 0, jumps = 0, picks = 0
+        var distinct = Set<Int>()
+        for _ in 0..<6000 {
+            let a = b.chooseArm(for: .large)
+            guard a != 8 else { continue }
+            picks += 1
+            distinct.insert(a)
+            if abs(arms.firstIndex(of: a)! - arms.firstIndex(of: 8)!) == 1 { adjacent += 1 } else { jumps += 1 }
+        }
+        XCTAssertGreaterThan(jumps, 0)
+        // 70% adjacent picks plus the adjacent arms' share of the uniform 30% (2 of 9).
+        XCTAssertEqual(Double(adjacent) / Double(picks), 0.7 + 0.3 * 2 / 9, accuracy: 0.04)
+        XCTAssertEqual(distinct, Set(arms).subtracting([8]))       // every other arm is tried
     }
 
-    func testEdgeArmOnlyExploresInward() {
+    func testCappedArmSetIsNeverExceeded() {
+        var b = make(start: 8) { $0.arms = $0.arms.filter { $0 <= 8 } }     // Google Drive
+        run(&b, 400) { 10 + Double($0) }
+        var seen = Set<Int>()
+        for _ in 0..<2000 { seen.insert(b.chooseArm(for: .large)) }
+        XCTAssertEqual(seen.max(), 8)
+        XCTAssertEqual(b.bestArm(for: .large), 8)
+    }
+
+    func testEdgeArmExploresItsOnlyNeighbourOrJumps() {
         var b = make(start: 4)
-        run(&b, 40) { $0 == 2 ? 50 : 5 }          // arm 2 is by far the best
-        XCTAssertEqual(b.bestArm(for: .large), 2)
-        for _ in 0..<300 { XCTAssertTrue([2, 4].contains(b.chooseArm(for: .large))) }
+        run(&b, 60) { $0 == 1 ? 50 : 5 }          // arm 1 is by far the best
+        XCTAssertEqual(b.bestArm(for: .large), 1)
+        var seen = Set<Int>()
+        for _ in 0..<2000 { seen.insert(b.chooseArm(for: .large)) }
+        XCTAssertTrue(seen.contains(2) && seen.contains(1))
     }
 
     func testExplorationNeverStops() {
@@ -107,11 +132,11 @@ final class TransfersBanditTests: XCTestCase {
             var b = make(seed: seed, start: 8)
             let first = run(&b, 3) { _ in 20 }
             XCTAssertEqual(first.first, 8)
-            XCTAssertTrue(first.allSatisfy { [4, 8, 12].contains($0) }, "\(first)")
+            XCTAssertTrue(first.allSatisfy { [6, 8, 10].contains($0) }, "\(first)")
         }
         for seed in 0..<40 as Range<UInt64> {
             var b = make(seed: seed, start: 4)
-            XCTAssertTrue(run(&b, 3) { _ in 20 }.allSatisfy { [2, 4, 8].contains($0) })
+            XCTAssertTrue(run(&b, 3) { _ in 20 }.allSatisfy { [3, 4, 6].contains($0) })
         }
     }
 
@@ -158,9 +183,9 @@ final class TransfersBanditTests: XCTestCase {
             b.record(batch(mbps: 10 * Double(arm), seconds: 30), arm: arm)
         }
         // Prior first, then the closer neighbour, then the other one; best (8) is then probed outward.
-        XCTAssertEqual(seen, [4, 2, 8])
+        XCTAssertEqual(seen, [4, 3, 6])
         now = now.addingTimeInterval(120)
-        XCTAssertEqual(b.chooseArm(for: .large), 12)
+        XCTAssertEqual(b.chooseArm(for: .large), 8)
     }
 
     func testProbeBudgetIsBoundedWhenBatchesNeverCount() {
@@ -168,13 +193,13 @@ final class TransfersBanditTests: XCTestCase {
         var probes = 0
         for _ in 0..<200 where b.chooseArm(for: .large) != 4 { probes += 1 }
         // Nothing is ever recorded: after the budget, only epsilon-greedy exploration remains.
-        XCTAssertEqual(Double(probes) / 200, 0.1, accuracy: 0.07)
+        XCTAssertEqual(Double(probes) / 200, 0.2, accuracy: 0.07)
         XCTAssertEqual(b.state.buckets["large"]?.probes, b.configuration.maxProbes)
     }
 
     func testReachesTheBestArmFastFromTheVMScenarioAndStaysThere() {
         // The curve seen in the VM: 2 -> 10, 4 -> 20, 8 -> 40 MB/s over 600 MB batches (S3-like prior of 4).
-        let curve: [Int: Double] = [2: 10, 4: 20, 8: 40, 12: 32, 16: 25]
+        let curve: [Int: Double] = [1: 5, 2: 10, 3: 15, 4: 20, 6: 30, 8: 40, 10: 38, 12: 32, 16: 25, 24: 15]
         var b = make(seed: 11, start: 4)
         var arms: [Int] = []
         for _ in 0..<60 {
@@ -186,7 +211,7 @@ final class TransfersBanditTests: XCTestCase {
         }
         XCTAssertTrue(arms.prefix(10).contains(8), "\(arms)")
         XCTAssertEqual(b.bestArm(for: .large), 8)
-        let after = arms.dropFirst(10)
+        let after = arms.dropFirst(12)
         let share = Double(after.filter { $0 == 8 }.count) / Double(after.count)
         XCTAssertGreaterThanOrEqual(share, 0.7, "\(arms)")
     }
@@ -200,16 +225,19 @@ final class TransfersBanditTests: XCTestCase {
             seen.append(arm)
             b.record(batch(mbps: 5 * Double(arm), seconds: 30), arm: arm)   // keeps improving up to 16
         }
-        XCTAssertTrue(seen.contains(16))
-        XCTAssertEqual(b.bestArm(for: .large), 16)
-        XCTAssertTrue(seen.allSatisfy { [2, 4, 8, 12, 16].contains($0) })
+        XCTAssertTrue(seen.contains(24))
+        XCTAssertEqual(b.bestArm(for: .large), 24)
+        XCTAssertTrue(seen.allSatisfy { BanditConfiguration.defaultArms.contains($0) })
     }
 
     func testEwmaMean() {
         var b = make()
         b.record(batch(mbps: 10), arm: 4)
         b.record(batch(mbps: 20), arm: 4)
-        XCTAssertEqual(b.stats(for: .large, arm: 4)!.mean, 13, accuracy: 0.001)
+        XCTAssertEqual(b.stats(for: .large, arm: 4)!.mean, 15, accuracy: 0.001)      // early samples weigh 1/(n+1)
+        for _ in 0..<20 { b.record(batch(mbps: 20), arm: 4) }
+        b.record(batch(mbps: 0.5), arm: 4)                                          // one bad sample moves a settled mean by alpha at most
+        XCTAssertGreaterThan(b.stats(for: .large, arm: 4)!.mean, 13)
     }
 
     func testRateLimitPenalisesEvenTinyBatches() {
