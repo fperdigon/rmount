@@ -732,11 +732,29 @@ private final class RecordsClient: RcloneControlClient, @unchecked Sendable {
 
 @MainActor
 final class UploadMonitorRecordsTests: XCTestCase {
+    func testTheSampleIsTimedAtTheStatsReadNotWhenTheSlowerCallsFinish() async {
+        final class SlowRecords: RcloneControlClient, @unchecked Sendable {
+            func vfsQueue() async throws -> VFSQueue { VFSQueue() }
+            func coreStats() async throws -> RcloneStats { RcloneStats(bytes: 1) }
+            func coreTransferred() async throws -> [CompletedTransfer] { try await Task.sleep(nanoseconds: 400_000_000); return [] }
+        }
+        var stamps: [(Date, Date)] = []
+        var started = Date()
+        let monitor = UploadMonitor(client: SlowRecords(), intervals: .init(pending: 100, idle: 100),
+                                    onSample: { _, _, _, at in stamps.append((at, Date())) }, onStatus: { _ in })
+        started = Date()
+        await monitor.refresh()
+        monitor.stop()
+        let (at, finished) = try! XCTUnwrap(stamps.first)
+        XCTAssertLessThan(at.timeIntervalSince(started), 0.2)                 // stamped at the stats read ...
+        XCTAssertGreaterThan(finished.timeIntervalSince(at), 0.3)             // ... not 0.4 s later when the slow call returned
+    }
+
     func testTransferRecordsAreFetchedOnlyWhenBusyOrBytesMoved() async {
         let client = RecordsClient()
         var got: [Bool] = []
         let monitor = UploadMonitor(client: client, intervals: .init(pending: 100, idle: 100),
-                                    onSample: { _, _, t in got.append(t != nil) }, onStatus: { _ in })
+                                    onSample: { _, _, t, _ in got.append(t != nil) }, onStatus: { _ in })
         await monitor.refresh()
         let first = client.fetches
         XCTAssertGreaterThanOrEqual(first, 1)
@@ -929,6 +947,42 @@ final class TransfersSliceControllerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(total, 70)
         XCTAssertEqual(Double(total - onBest) / Double(total), 0.2, accuracy: 0.14)     // includes the cold start's probes
         XCTAssertGreaterThan(far, 0)                                                     // uniform jumps happen
+    }
+
+    /// The VM's capped run: ~91 s slices whose counter is flat for 25 s and then runs fast, while the slow
+    /// `core/transferred` call makes the observe call arrive up to 25 s after the counter was read. The reward is the
+    /// counter's growth over the same two samples' own times, so it equals the true average over the slice.
+    func testRewardEqualsTheCounterRateEvenWhenSamplesArriveLate() async throws {
+        let remote = makeRemote(backend: sftpBackend())
+        var seed = TransfersBandit(clock: { self.now }, random: { 0.99 })
+        for arm in [3, 4, 6] { for _ in 0..<3 { seed.record(UploadBatch(bytes: 600_000_000, duration: arm == 4 ? 15 : 60, fileCount: 6), arm: arm) } }
+        try TransfersBanditStore(directory: dir).save(seed.state, remote: remote.id.uuidString)
+        let c = TransfersController(remote: remote, startingArm: 4, store: TransfersBanditStore(directory: dir), client: TransfersClient(),
+                                    random: { 0.99 }, clock: { [unowned self] in self.now }, log: { _ in })
+        let q = VFSQueue(queue: [entry(1, size: 500_000_000_000)])
+        func counter(_ t: Double) -> Double {                          // 91 s cycle: flat 25 s, then 66 s at 21.2 MB/s
+            let cycles = (t / 91).rounded(.down), r = t - cycles * 91
+            return (cycles * 66 + max(0, r - 25)) * 21.2e6
+        }
+        var closes: [(t: Double, reward: Double)] = []
+        var lastBatches = c.bandit.state.buckets["large"]?.batches ?? 0
+        var t = 0.0
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0), sampledAt: t0)
+        XCTAssertEqual(c.currentArm, 4)
+        while t < 600 {
+            t += 1.5
+            let sampled = t0.addingTimeInterval(t)
+            now = sampled.addingTimeInterval(Int(t / 1.5) % 40 == 0 ? 25 : 0)      // the observe call arrives 25 s late at the slice edges
+            await c.observe(queue: q, stats: RcloneStats(bytes: Int64(counter(t))), sampledAt: sampled)
+            let b = c.bandit.state.buckets["large"]?.batches ?? 0
+            if b > lastBatches, let r = c.bandit.state.buckets["large"]?.lastReward { closes.append((t, r)); lastBatches = b }
+        }
+        XCTAssertGreaterThanOrEqual(closes.count, 5)
+        for i in 1..<closes.count {
+            let span = closes[i].t - closes[i - 1].t
+            let truth = (counter(closes[i].t) - counter(closes[i - 1].t)) / span / 1e6
+            XCTAssertEqual(closes[i].reward, truth, accuracy: truth * 0.05, "slice \(i): \(closes)")
+        }
     }
 
     func testFirstSlicesStayNearThePriorAndADriveRemoteNeverExceedsEight() async throws {

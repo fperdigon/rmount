@@ -159,15 +159,17 @@ final class UploadMonitor {
     private let client: RcloneControlClient
     private let onStatus: (UploadStatus) -> Void
     /// Called after each successful queue poll with the raw queue, the stats (if they worked) and rclone's
-    /// completed-transfer records (nil when not fetched or unsupported).
-    private let onSample: ((VFSQueue, RcloneStats?, [CompletedTransfer]?) async -> Void)?
+    /// completed-transfer records (nil when not fetched or unsupported) and when the byte counter was read: the
+    /// middle of the `core/stats` request, not the time the slower calls after it finished (a busy rclone can take
+    /// many seconds to answer them, which would shift the timestamp and inflate a measured rate).
+    private let onSample: ((VFSQueue, RcloneStats?, [CompletedTransfer]?, Date) async -> Void)?
     private var lastBytes: Int64?
     private var lastQueue = VFSQueue()
     private var failedPolls = 0
     private var stopped = false
 
     init(client: RcloneControlClient, intervals: Intervals = Intervals(),
-         onSample: ((VFSQueue, RcloneStats?, [CompletedTransfer]?) async -> Void)? = nil,
+         onSample: ((VFSQueue, RcloneStats?, [CompletedTransfer]?, Date) async -> Void)? = nil,
          onStatus: @escaping (UploadStatus) -> Void) {
         self.client = client
         self.onStatus = onStatus
@@ -190,7 +192,9 @@ final class UploadMonitor {
             var queueSucceeded = false
             var stats: RcloneStats?
             do { self.lastQueue = try await self.client.vfsQueue(); queueSucceeded = true } catch {}
+            let statsStart = Date()
             do { stats = try await self.client.coreStats() } catch {}
+            let sampledAt = Date(timeIntervalSince1970: (statsStart.timeIntervalSince1970 + Date().timeIntervalSince1970) / 2)
             // Transfer records are read when the queue is busy or the byte counter moved since the last poll,
             // so an idle poll stays two cheap calls.
             var transferred: [CompletedTransfer]?
@@ -204,7 +208,7 @@ final class UploadMonitor {
             let status = self.lastQueue.status(stats: queueSucceeded ? stats : nil, isStale: self.failedPolls >= 2)
             self.inFlight = nil
             if !self.stopped && !Task.isCancelled { self.onStatus(status) }
-            if queueSucceeded, !self.stopped, !Task.isCancelled { await self.onSample?(self.lastQueue, stats, transferred) }
+            if queueSucceeded, !self.stopped, !Task.isCancelled { await self.onSample?(self.lastQueue, stats, transferred, sampledAt) }
             return status
         }
         inFlight = sample

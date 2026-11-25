@@ -107,9 +107,11 @@ public final class TransfersController {
 
     /// Feed one sample: the queue, core stats and (when available) rclone's completed-transfer records.
     /// Samples that arrive while an arm change is in flight are dropped.
-    public func observe(queue: VFSQueue, stats: RcloneStats?, transferred: [CompletedTransfer]? = nil) async {
+    public func observe(queue: VFSQueue, stats: RcloneStats?, transferred: [CompletedTransfer]? = nil,
+                        sampledAt: Date? = nil) async {
         guard !busy, !stopped else { return }
-        let now = clock()
+        // The time the byte counter was read, so a slow fetch of the other data cannot shift it.
+        let now = sampledAt ?? clock()
         let entries = queue.queue.filter { !TransferProgress.isSidecar($0.name ?? "") }
         let event = tracker.observe(queue: queue, stats: stats, now: now)
         let flags = tracker.takeFlags()
@@ -155,10 +157,10 @@ public final class TransfersController {
             needsPrepare = true
         } else if meter.isActive, meter.isDue(now: now) {
             closeSlice()
-            await pull(from: now, carry: stats?.bytes)
+            await pull(at: now, carry: stats?.bytes)
         }
         if builder.hasPending {
-            for built in builder.finish(now: clock(), queueEmpty: entries.isEmpty,
+            for built in builder.finish(now: max(clock(), now), queueEmpty: entries.isEmpty,
                                         uploading: entries.contains { $0.uploading == true }) {
                 learn(built)
             }
@@ -180,16 +182,18 @@ public final class TransfersController {
         }
         bandit.record(slice, arm: currentArm, bucket: bucket)
         batchMeasured = true
+        log("transfers \(remoteID.uuidString) slice arm=\(currentArm) bucket=\(bucket.rawValue) \(reading.bytes / 1_000_000) MB in \(Int(reading.duration)) s")
         save()
     }
 
     /// Slice edge while uploads continue: choose the arm for the next slice, apply it live and start measuring.
-    private func pull(from now: Date, carry: Int64?) async {
+    private func pull(at sampleTime: Date, carry: Int64?) async {
         let arm = bandit.chooseArm(for: bucket)
         let changed = await apply(arm)
         if !changed, arm != currentArm { bandit.retract(bucket: bucket) }
         // After a change, uploads already running keep their old concurrency for a while: skip the warm-up.
-        meter.begin(at: clock(), warmup: changed ? meter.warmup : 0, baseline: changed ? nil : carry)
+        // Unchanged arm: the next slice starts exactly at the sample that ended this one (same instant, same counter).
+        meter.begin(at: changed ? clock() : sampleTime, warmup: changed ? meter.warmup : 0, baseline: changed ? nil : carry)
     }
 
     /// Chooses the arm for the next batch and puts it in force now, while nothing is uploading.

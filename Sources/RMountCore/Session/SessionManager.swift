@@ -129,14 +129,14 @@ public final class SessionManager: ObservableObject {
 
     func startUploadMonitor(remoteID: UUID, client: RcloneControlClient, startingArm: Int? = nil) {
         stopUploadMonitor(remoteID: remoteID)
-        var onSample: ((VFSQueue, RcloneStats?, [CompletedTransfer]?) async -> Void)?
+        var onSample: ((VFSQueue, RcloneStats?, [CompletedTransfer]?, Date) async -> Void)?
         if let startingArm, let store = transfersStore,
            let remote = sessions.first(where: { $0.id == remoteID })?.remote {
             let controller = TransfersController(
                 remote: remote, startingArm: startingArm, store: store, client: client, random: transfersRandom,
                 onChange: { [weak self] arm in self?.transfersParallelism[remoteID] = arm })
             transfersControllers[remoteID] = controller
-            onSample = { queue, stats, transferred in await controller.observe(queue: queue, stats: stats, transferred: transferred) }
+            onSample = { queue, stats, transferred, at in await controller.observe(queue: queue, stats: stats, transferred: transferred, sampledAt: at) }
         }
         if let session = sessions.first(where: { $0.id == remoteID }) {
             finderBadgeTracker.sync(remoteID: remoteID, remoteName: session.remote.name,
