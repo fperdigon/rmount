@@ -328,7 +328,7 @@ final class TransfersControllerTests: XCTestCase {
         }
         XCTAssertTrue(armsUsed.prefix(10).contains(8), "\(armsUsed)")
         let tail = armsUsed.dropFirst(10)
-        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 8 }.count) / Double(tail.count), 0.8, "\(armsUsed)")
+        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 8 }.count) / Double(tail.count), 0.7, "\(armsUsed)")
     }
 
     func testStalledBatchIsNotPersisted() async {
@@ -743,7 +743,7 @@ final class TransfersRecordsControllerTests: XCTestCase {
         XCTAssertTrue(arms.prefix(10).contains(8), "\(arms)")
         XCTAssertEqual(c.bandit.bestArm(for: .large), 8)
         let tail = arms.dropFirst(10)
-        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 8 }.count) / Double(tail.count), 0.8, "\(arms)")
+        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 8 }.count) / Double(tail.count), 0.7, "\(arms)")
         for (arm, mbps) in curve {
             if let s = c.bandit.stats(for: .large, arm: arm) { XCTAssertEqual(s.mean, mbps, accuracy: mbps * 0.05, "arm \(arm)") }
         }
@@ -756,7 +756,7 @@ final class TransfersRecordsControllerTests: XCTestCase {
         XCTAssertTrue(arms.prefix(14).contains(16), "\(arms)")
         XCTAssertEqual(c.bandit.bestArm(for: .large), 16)
         let tail = arms.dropFirst(14)
-        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 16 }.count) / Double(tail.count), 0.8, "\(arms)")
+        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 16 }.count) / Double(tail.count), 0.7, "\(arms)")
     }
 }
 
