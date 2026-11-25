@@ -64,6 +64,9 @@ public final class TransfersController {
     /// Periods the slices measured (batch start ... last sample), so record-built batches do not count twice.
     private var observed: [(start: Date, end: Date)] = []
     private var batchStart: Date?
+    /// At least one slice of the running batch was counted by the bandit.
+    private var batchMeasured = false
+    private var loggedRetentionDrops = 0
 
     /// The arm to start rclone with (`--transfers`): the best known one, or the backend's prior.
     public static func startupArm(for remote: Remote, store: TransfersBanditStore) -> Int {
@@ -113,6 +116,7 @@ public final class TransfersController {
             bucket = WorkloadBucket.bucket(bytes: bytes, fileCount: files,
                                            smallFileThreshold: bandit.configuration.smallFileThreshold)
             batchStart = now
+            batchMeasured = false
             needsPrepare = false
             meter.begin(at: now, warmup: 0)
         }
@@ -124,12 +128,21 @@ public final class TransfersController {
             } ?? false
             meter.sample(time: now, bytes: stats?.bytes, contaminated: foreign, rateLimited: flags.rateLimited, failed: flags.failed)
         }
-        if let transferred { builder.add(transferred) }
+        if let transferred {
+            builder.add(transferred)
+            if builder.droppedForRetention > loggedRetentionDrops {
+                log("transfers \(remoteID.uuidString) \(builder.droppedForRetention - loggedRetentionDrops) records dropped: rclone's list was full")
+                loggedRetentionDrops = builder.droppedForRetention
+            }
+        }
         if case .finished(let batch)? = event {
             closeSlice(extraRateLimited: batch?.rateLimited ?? false, extraFailed: batch?.failed ?? false,
-                       stalled: batch == nil)
-            if let s = batchStart { observed.append((s, now)); if observed.count > 16 { observed.removeFirst() } }
+                       stalled: batch == nil, final: true)
+            // Only a batch the slices really measured is excluded from the records rebuild: one seen just at its
+            // tail (dropped as too short) is still credited from the records; a stalled one is never credited.
+            if let s = batchStart, batchMeasured || batch == nil { observed.append((s, now)); if observed.count > 16 { observed.removeFirst() } }
             batchStart = nil
+            batchMeasured = false
             needsPrepare = true
         } else if meter.isActive, meter.isDue(now: now) {
             closeSlice()
@@ -144,14 +157,20 @@ public final class TransfersController {
         if needsPrepare, entries.isEmpty, !tracker.isActive { await pullIdle() }
     }
 
-    private func closeSlice(extraRateLimited: Bool = false, extraFailed: Bool = false, stalled: Bool = false) {
-        guard let reading = meter.finish(extraRateLimited: extraRateLimited, extraFailed: extraFailed, stalledOverride: stalled) else {
-            log("transfers \(remoteID.uuidString) slice ignored")
+    private func closeSlice(extraRateLimited: Bool = false, extraFailed: Bool = false, stalled: Bool = false, final: Bool = false) {
+        guard let reading = meter.finish(extraRateLimited: extraRateLimited, extraFailed: extraFailed, stalledOverride: stalled,
+                                         endAtLastProgress: final) else {
+            log("transfers \(remoteID.uuidString) slice ignored: \(meter.dropReason)")
             return
         }
         let slice = UploadBatch(bytes: reading.bytes, duration: reading.duration, fileCount: sliceFiles,
                                 rateLimited: reading.rateLimited, failed: reading.failed)
+        if let why = bandit.rejectionReason(for: slice, arm: currentArm) {
+            log("transfers \(remoteID.uuidString) slice ignored: \(why)")
+            return
+        }
         bandit.record(slice, arm: currentArm, bucket: bucket)
+        batchMeasured = true
         save()
     }
 
@@ -193,7 +212,8 @@ public final class TransfersController {
         needsPrepare = true
         if observed.contains(where: { built.start < $0.end.addingTimeInterval(2) && built.end > $0.start.addingTimeInterval(-2) })
             || (batchStart.map { built.end > $0.addingTimeInterval(-2) } ?? false) {
-            return                                   // the slices already measured this one
+            log("transfers \(remoteID.uuidString) recorded batch skipped: the slices measured it")
+            return
         }
         guard let arm = armInForce(from: built.start, to: built.end) else {
             log("transfers \(remoteID.uuidString) batch discarded (arm changed during it)")
@@ -201,6 +221,10 @@ public final class TransfersController {
         }
         bucket = WorkloadBucket.bucket(bytes: built.batch.bytes, fileCount: built.batch.fileCount,
                                        smallFileThreshold: bandit.configuration.smallFileThreshold)
+        if let why = bandit.rejectionReason(for: built.batch, arm: arm) {
+            log("transfers \(remoteID.uuidString) recorded batch ignored: \(why)")
+            return
+        }
         bandit.record(built.batch, arm: arm, bucket: bucket)
         save()
     }

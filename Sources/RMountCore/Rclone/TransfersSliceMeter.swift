@@ -7,15 +7,18 @@ import Foundation
 /// big file would land in a single slice), the counter moves continuously, so slices inside one long copy get
 /// fair numbers. Only uploads are meant to count: a sample taken while rclone also transfers a file that is not
 /// in the upload queue (a download) marks the slice contaminated and it is dropped. The reward is the counter's
-/// growth between the first sample after the warm-up and the last sample that still showed progress, divided by
-/// the time between those samples (the tail where the queue drains is not counted). Right after an arm change
+/// growth between the first sample after the warm-up and the last sample of the slice, divided by the time
+/// between those two samples, so a pause in the middle of the slice counts as the slow time it was (a running
+/// rate would hide it). Only when the batch itself ended in this slice, the end is the last sample that showed
+/// progress, so the tail where the queue drains is not counted. Right after an arm change
 /// the first `warmup` seconds are skipped: uploads already running keep their old concurrency until they finish.
-/// A sample with no progress `stallGap` seconds after the last progress marks the slice stalled (a hung backend says nothing about the arm).
+/// A slice with no progress for `stallGap` seconds is stalled (a hung backend says nothing about the arm); a pause
+/// shorter than that stays in the average.
 /// Pure: the caller passes the times.
 public struct TransfersSliceMeter {
     public var length: TimeInterval = 60
     public var warmup: TimeInterval = 10
-    public var stallGap: TimeInterval = 20
+    public var stallGap: TimeInterval = 45
 
     public struct Reading: Equatable {
         public var bytes: Int64
@@ -33,6 +36,8 @@ public struct TransfersSliceMeter {
     private var stalled = false
     private var rateLimited = false
     private var failed = false
+    /// Why the last `finish` returned nil, for the debug log.
+    public private(set) var dropReason = ""
 
     public init() {}
 
@@ -79,15 +84,21 @@ public struct TransfersSliceMeter {
 
     /// Ends the slice. Nil when it cannot be used (too little measured, stalled, contaminated, no counter);
     /// a rate-limited slice always yields a reading so the arm can be penalised.
-    public mutating func finish(extraRateLimited: Bool = false, extraFailed: Bool = false, stalledOverride: Bool = false) -> Reading? {
+    public mutating func finish(extraRateLimited: Bool = false, extraFailed: Bool = false, stalledOverride: Bool = false,
+                                endAtLastProgress: Bool = false) -> Reading? {
         defer { start = nil; windowStart = nil; baseline = nil; last = nil; lastProgress = nil }
-        guard start != nil else { return nil }
+        dropReason = ""
+        guard start != nil else { dropReason = "no slice running"; return nil }
         let limited = rateLimited || extraRateLimited
         let bad = failed || extraFailed
         if limited { return Reading(bytes: 0, duration: 0, rateLimited: true, failed: false) }
-        if stalled || stalledOverride || contaminated { return nil }
-        guard let b = baseline, let p = lastProgress, p.time > b.time, p.bytes > b.bytes else { return nil }
-        return Reading(bytes: p.bytes - b.bytes, duration: p.time.timeIntervalSince(b.time), rateLimited: false, failed: bad)
+        if stalled || stalledOverride { dropReason = "stalled"; return nil }
+        if contaminated { dropReason = "a download ran during the slice"; return nil }
+        guard let b = baseline else { dropReason = "no byte counter after the warm-up"; return nil }
+        guard let end = endAtLastProgress ? lastProgress : last, end.time > b.time, end.bytes > b.bytes else {
+            dropReason = "no progress measured"; return nil
+        }
+        return Reading(bytes: end.bytes - b.bytes, duration: end.time.timeIntervalSince(b.time), rateLimited: false, failed: bad)
     }
 
     /// The counter at the last sample, to carry a slice on into the next one unchanged.

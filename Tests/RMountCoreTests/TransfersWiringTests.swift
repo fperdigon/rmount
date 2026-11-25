@@ -729,10 +729,29 @@ final class TransfersSliceMeterTests: XCTestCase {
         var m = TransfersSliceMeter()
         m.begin(at: at(0), warmup: 0)
         feed(&m, [(0, 0), (1.5, 15_000_000), (30, 600_000_000), (60, 1_200_000_000), (61.5, 1_200_000_000)])
-        let r = m.finish()
+        let r = m.finish(endAtLastProgress: true)               // the batch ended here: the drain tail is not counted
         XCTAssertEqual(r?.bytes, 1_200_000_000)
         XCTAssertEqual(r!.duration, 60, accuracy: 0.001)
         XCTAssertFalse(m.isActive)
+    }
+
+    func testASliceEndsAtItsLastSampleSoAMidSlicePauseCountsAsSlowTime() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(0), warmup: 0)
+        // 40 MB/s for 20 s, a 25 s pause, then 40 MB/s again until the slice ends at 60 s.
+        feed(&m, [(0, 0), (10, 400_000_000), (20, 800_000_000), (30, 800_000_000), (45, 800_000_000), (46.5, 860_000_000), (60, 1_400_000_000)])
+        let r = try! XCTUnwrap(m.finish())
+        XCTAssertEqual(r.bytes, 1_400_000_000)
+        XCTAssertEqual(r.duration, 60, accuracy: 0.001)
+        XCTAssertEqual(r.bytes.asMBps(r.duration), 23.3, accuracy: 0.5)            // not the 40 MB/s of a running rate
+    }
+
+    func testAHungSliceIsStalledButAShortPauseIsNot() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0), (10, 100_000_000), (40, 100_000_000), (56, 100_000_000), (60, 200_000_000)])   // 46 s without progress
+        XCTAssertNil(m.finish())
+        XCTAssertEqual(m.dropReason, "stalled")
     }
 
     func testWarmupAfterAnArmChangeIsSkipped() {
@@ -756,11 +775,12 @@ final class TransfersSliceMeterTests: XCTestCase {
     func testStalledContaminatedAndEmptySlicesYieldNothing() {
         var m = TransfersSliceMeter()
         m.begin(at: at(0), warmup: 0)
-        feed(&m, [(0, 0), (10, 100), (40, 100), (41, 200)])               // 30 s without progress
+        feed(&m, [(0, 0), (10, 100), (40, 100), (56, 100), (57, 200)])    // 46 s without progress
         XCTAssertNil(m.finish())
         m.begin(at: at(0), warmup: 0)
         feed(&m, [(0, 0), (30, 900_000_000)], contaminated: true)         // a download ran too
         XCTAssertNil(m.finish())
+        XCTAssertTrue(m.dropReason.contains("download"))
         m.begin(at: at(0), warmup: 0)
         feed(&m, [(0, 0), (30, 0)])
         XCTAssertNil(m.finish())
@@ -923,6 +943,33 @@ final class TransfersSliceControllerTests: XCTestCase {
         let s = try XCTUnwrap(c.bandit.stats(for: .large, arm: 4))
         XCTAssertEqual(s.count, 1)
         XCTAssertEqual(s.mean, 0, accuracy: 0.001)                       // mean 0 x 0.25: an unmeasured arm penalised
+    }
+
+    func testABatchSeenOnlyAtItsTailIsDroppedAsASliceButCreditedFromTheRecords() async throws {
+        let c = make(client: TransfersClient())
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 0), transferred: [])           // idle poll
+        // 15 s at 40 MB/s that started and ended between polls; the next poll catches only the drained queue ... 
+        // but a poll in between saw the last file still queued (1.5 s before the end).
+        let q = VFSQueue(queue: [entry(1, size: 600_000_000)])
+        now = t0.addingTimeInterval(33)
+        await c.observe(queue: q, stats: RcloneStats(bytes: 580_000_000), transferred: [])
+        now = t0.addingTimeInterval(34.5)
+        let r = rec("f", 18, 33.5, bytes: 600_000_000)                                              // 15 s, 40 MB/s
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 600_000_000), transferred: [r])
+        XCTAssertTrue(logs.contains { $0.contains("slice ignored") }, "\(logs)")
+        let s = try XCTUnwrap(c.bandit.stats(for: .large, arm: 4))
+        XCTAssertEqual(s.count, 1)
+        XCTAssertEqual(s.mean, 40, accuracy: 2)
+    }
+
+    func testEveryDropIsLoggedWithItsReason() async throws {
+        let c = make(client: TransfersClient())
+        let q = VFSQueue(queue: [entry(1, size: 30_000_000)])
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0))
+        now = now.addingTimeInterval(8)
+        await c.observe(queue: q, stats: RcloneStats(bytes: 30_000_000))
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 30_000_000))                    // 30 MB in 8 s: too little
+        XCTAssertTrue(logs.contains { $0.contains("slice ignored: too little data") }, "\(logs)")
     }
 
     func testBatchOfAnotherBucketIsCreditedUnderItsBucket() async throws {
