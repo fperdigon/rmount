@@ -144,7 +144,7 @@ public final class SessionManager: ObservableObject {
         }
         let generation = UUID()
         uploadGenerations[remoteID] = generation
-        uploadMonitors[remoteID] = UploadMonitor(client: client, onSample: onSample) { [weak self] status in
+        uploadMonitors[remoteID] = UploadMonitor(client: client, intervals: .forController(onSample != nil), onSample: onSample) { [weak self] status in
             guard let self, self.uploadGenerations[remoteID] == generation else { return }
             if self.uploadStatus[remoteID] != status { self.uploadStatus[remoteID] = status }
             if !status.hasPending, !status.isStale, self.legacyCacheMounts.contains(remoteID) {
@@ -174,7 +174,7 @@ public final class SessionManager: ObservableObject {
     private func stopUploadMonitor(remoteID: UUID) {
         uploadGenerations[remoteID] = nil
         uploadMonitors.removeValue(forKey: remoteID)?.stop()
-        transfersControllers[remoteID] = nil
+        transfersControllers.removeValue(forKey: remoteID)?.stop()
         transfersParallelism[remoteID] = nil
         uploadStatus[remoteID] = nil
         finderProgressPublisher.clear(remoteID: remoteID)
@@ -355,6 +355,7 @@ public final class SessionManager: ObservableObject {
         if let session = sessions.first(where: { $0.id == remoteID }), case .mounted = session.status {
             try? await unmount(remoteID: remoteID, force: true)
         }
+        stopUploadMonitor(remoteID: remoteID)          // no controller may save again after the state file is removed
         transfersStore?.remove(remote: remoteID.uuidString)
         try? keychain.delete(remoteID: remoteID, kind: .password)
         try? keychain.delete(remoteID: remoteID, kind: .keyPassphrase)

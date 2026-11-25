@@ -144,10 +144,13 @@ public struct URLSessionRcloneControlClient: RcloneControlClient {
 @MainActor
 final class UploadMonitor {
     struct Intervals {
-        /// While files are queued or uploading: fast enough to time a batch to within a second or two.
-        var pending: TimeInterval = 1.5
+        /// While files are queued or uploading.
+        var pending: TimeInterval = 2.5
         /// Nothing queued: a lazy poll (energy saving); a batch seen late is back-dated by the tracker.
         var idle: TimeInterval = 15
+        /// A remote whose `--transfers` is tuned is sampled faster while uploading, to measure each slice; the others
+        /// keep the cheaper rate.
+        static func forController(_ tuned: Bool) -> Intervals { tuned ? Intervals(pending: 1.5) : Intervals() }
         func delay(for status: UploadStatus) -> TimeInterval { status.hasPending ? pending : idle }
     }
 

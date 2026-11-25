@@ -6,9 +6,11 @@ import Foundation
 /// the clock. Bytes are the growth of rclone's cumulative `core/stats` counter (capped by the queued file
 /// sizes, so a download that runs meanwhile cannot inflate the reward).
 ///
-/// Rate limits: rclone's pacer retries 429s silently, so a rising `tries` count in the queue or a rising
-/// error count whose `lastError` looks like throttling marks the batch as rate limited. Another error marks
-/// it failed. A hung backend shows no error at all: bytes stop while items are uploading; such a stalled
+/// Rate limits: rclone's pacer retries 429s silently, so a sustained retry signal in the queue (an entry's `tries` or
+/// backoff `delay` rising at least twice; one retry alone is not enough, and a `delay` that merely waits out the
+/// write-back time is not a signal) or a rising
+/// error count whose new `lastError` looks like throttling marks the batch as rate limited. A `lastError` that
+/// did not come with a rising error count is stale and ignored. Another error marks it failed. A hung backend shows no error at all: bytes stop while items are uploading; such a stalled
 /// batch (and one with no progress for a long time) is dropped, never recorded as good or bad.
 public struct TransfersBatchTracker {
     public enum Event: Equatable {
@@ -28,7 +30,10 @@ public struct TransfersBatchTracker {
         var counted: Int64 = 0
         var files: [String: Int64] = [:]
         var baselineErrors: Int?
-        var retried = false
+        /// Times an entry's `tries` or backoff `delay` went up between polls.
+        var retrySignals = 0
+        var triesSeen: [String: Int] = [:]
+        var delaySeen: [String: Double] = [:]
         var throttled = false
         var failed = false
         var stalled = false
@@ -39,11 +44,19 @@ public struct TransfersBatchTracker {
 
     public init() {}
 
+    /// Anchored throttling signals only: an HTTP 429 status, "rate limit", "too many requests", "slow down",
+    /// "throttl". Not a bare "429" (a file name) and not "quota" (Drive's storageQuotaExceeded means the account
+    /// is full).
     public static func looksRateLimited(_ text: String) -> Bool {
         let t = text.lowercased()
-        return ["429", "ratelimit", "rate limit", "rate_limit", "too many requests", "quota", "throttl",
-                "slow down", "slowdown", "userratelimitexceeded"].contains { t.contains($0) }
+        if ["ratelimit", "rate limit", "rate_limit", "too many requests", "throttl", "slow down", "slowdown"].contains(where: { t.contains($0) }) {
+            return true
+        }
+        return t.range(of: #"(http|https|status|code|error|response)[^a-z0-9]{0,8}429(?![0-9])|(?<![a-z0-9.])429 (too|error)"#,
+                       options: .regularExpression) != nil
     }
+
+    private static func retrying(_ a: Active) -> Bool { a.retrySignals >= 2 }
 
     public mutating func observe(queue: VFSQueue, stats: RcloneStats?, now: Date) -> Event? {
         let entries = queue.queue.filter { !TransferProgress.isSidecar($0.name ?? "") }
@@ -66,7 +79,7 @@ public struct TransfersBatchTracker {
             let end = a.lastProgress > a.start ? a.lastProgress : now
             return .finished(UploadBatch(bytes: bytes, duration: end.timeIntervalSince(a.start),
                                          fileCount: a.files.count,
-                                         rateLimited: a.throttled || (a.retried && !a.failed),
+                                         rateLimited: a.throttled || (Self.retrying(a) && !a.failed),
                                          failed: a.failed))
         }
         if stats?.bytes != nil {
@@ -83,8 +96,8 @@ public struct TransfersBatchTracker {
     /// Rate-limit and failure signals seen since the last call (then cleared), so each time slice gets its own.
     public mutating func takeFlags() -> (rateLimited: Bool, failed: Bool) {
         guard var a = active else { return (false, false) }
-        let flags = (a.throttled || (a.retried && !a.failed), a.failed)
-        a.throttled = false; a.retried = false; a.failed = false
+        let flags = (a.throttled || (Self.retrying(a) && !a.failed), a.failed)
+        a.throttled = false; a.retrySignals = 0; a.failed = false
         active = a
         return flags
     }
@@ -94,7 +107,12 @@ public struct TransfersBatchTracker {
         for e in entries {
             let key = e.id.map(String.init) ?? e.name ?? "?"
             a.files[key] = max(a.files[key] ?? 0, e.size ?? 0)
-            if (e.tries ?? 0) >= 2 { a.retried = true }
+            let tries = e.tries ?? 0
+            if let before = a.triesSeen[key], tries > before { a.retrySignals += 1 }
+            a.triesSeen[key] = tries
+            let delay = e.delay ?? 0
+            if let before = a.delaySeen[key], delay > before { a.retrySignals += 1 }
+            a.delaySeen[key] = delay
         }
         if let counter = stats?.bytes {
             if let last = a.lastCounter {

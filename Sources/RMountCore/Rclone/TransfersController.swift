@@ -58,6 +58,8 @@ public final class TransfersController {
     private let onChange: (Int) -> Void
     private var bucket: WorkloadBucket = .large
     private var busy = false
+    /// The remote was unmounted or deleted: nothing more is applied or saved (its state file may be gone).
+    private var stopped = false
     /// Nothing has been chosen for the next batch yet.
     private var needsPrepare = true
     private var sliceFiles = 1
@@ -106,15 +108,22 @@ public final class TransfersController {
     /// Feed one sample: the queue, core stats and (when available) rclone's completed-transfer records.
     /// Samples that arrive while an arm change is in flight are dropped.
     public func observe(queue: VFSQueue, stats: RcloneStats?, transferred: [CompletedTransfer]? = nil) async {
-        guard !busy else { return }
+        guard !busy, !stopped else { return }
         let now = clock()
         let entries = queue.queue.filter { !TransferProgress.isSidecar($0.name ?? "") }
         let event = tracker.observe(queue: queue, stats: stats, now: now)
         let flags = tracker.takeFlags()
         if case .started(let files, let bytes)? = event {
             sliceFiles = max(files, 1)
-            bucket = WorkloadBucket.bucket(bytes: bytes, fileCount: files,
-                                           smallFileThreshold: bandit.configuration.smallFileThreshold)
+            let newBucket = WorkloadBucket.bucket(bytes: bytes, fileCount: files,
+                                                  smallFileThreshold: bandit.configuration.smallFileThreshold)
+            if newBucket != bucket {
+                // The idle pull chose this arm for the previous batch's bucket: choose again for the bucket this batch
+                // really is, so the slice is credited to an arm picked for it.
+                bucket = newBucket
+                let arm = bandit.chooseArm(for: newBucket)
+                if await !apply(arm), arm != currentArm { bandit.retract(bucket: newBucket) }
+            }
             batchStart = now
             batchMeasured = false
             needsPrepare = false
@@ -178,6 +187,7 @@ public final class TransfersController {
     private func pull(from now: Date, carry: Int64?) async {
         let arm = bandit.chooseArm(for: bucket)
         let changed = await apply(arm)
+        if !changed, arm != currentArm { bandit.retract(bucket: bucket) }
         // After a change, uploads already running keep their old concurrency for a while: skip the warm-up.
         meter.begin(at: clock(), warmup: changed ? meter.warmup : 0, baseline: changed ? nil : carry)
     }
@@ -185,7 +195,8 @@ public final class TransfersController {
     /// Chooses the arm for the next batch and puts it in force now, while nothing is uploading.
     private func pullIdle() async {
         needsPrepare = false
-        _ = await apply(bandit.chooseArm(for: bucket))
+        let arm = bandit.chooseArm(for: bucket)
+        if await !apply(arm), arm != currentArm { bandit.retract(bucket: bucket) }
     }
 
     private func apply(_ arm: Int) async -> Bool {
@@ -229,7 +240,11 @@ public final class TransfersController {
         save()
     }
 
+    /// Stops the controller for good (unmount or delete): later samples are ignored and nothing is saved again.
+    public func stop() { stopped = true }
+
     private func save() {
+        guard !stopped else { return }
         do { try store.save(bandit.state, remote: remoteID.uuidString) }
         catch { log("transfers \(remoteID.uuidString) could not save state") }
     }
