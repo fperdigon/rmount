@@ -26,11 +26,14 @@ public extension Remote {
     }
 }
 
-/// Drives rclone's `--transfers` for one mounted remote: watches its upload queue, picks a value with the
-/// bandit when a batch starts (applied live with `options/set`), and learns from the batch when it ends.
+/// Drives rclone's `--transfers` for one mounted remote: watches its upload queue, picks the value for the
+/// next batch with the bandit while idle (at startup and right after a batch drains; applied live with
+/// `options/set`), so it is already in force when the first byte is written, and learns from the batch when it
+/// ends. A batch is credited to the arm that was in force when it started; if the arm changed meanwhile the
+/// sample is discarded.
 @MainActor
 public final class TransfersController {
-    public private(set) var currentArm: Int
+    public internal(set) var currentArm: Int
     public private(set) var bandit: TransfersBandit
     private var tracker = TransfersBatchTracker()
     private let remoteID: UUID
@@ -41,6 +44,10 @@ public final class TransfersController {
     private let onChange: (Int) -> Void
     private var bucket: WorkloadBucket = .large
     private var busy = false
+    /// Nothing has been chosen for the next batch yet.
+    private var needsPrepare = true
+    /// The arm in force when the running batch started.
+    private var armAtStart: Int?
 
     /// The arm to start rclone with (`--transfers`): the best known one, or the backend's prior.
     public static func startupArm(for remote: Remote, store: TransfersBanditStore) -> Int {
@@ -77,31 +84,50 @@ public final class TransfersController {
     /// Feed one queue/stats sample. Samples that arrive while an arm change is in flight are dropped.
     public func observe(queue: VFSQueue, stats: RcloneStats?) async {
         guard !busy else { return }
-        guard let event = tracker.observe(queue: queue, stats: stats, now: clock()) else { return }
+        let event = tracker.observe(queue: queue, stats: stats, now: clock())
         switch event {
-        case .started(let files, let bytes):
-            bucket = WorkloadBucket.bucket(bytes: bytes, fileCount: files,
-                                           smallFileThreshold: bandit.configuration.smallFileThreshold)
-            let arm = bandit.chooseArm(for: bucket)
-            guard arm != currentArm else { return }
-            busy = true
-            defer { busy = false }
-            do {
-                try await client.setTransfers(arm)
-                log("transfers \(remoteID.uuidString) bucket=\(bucket.rawValue) \(currentArm) -> \(arm)")
-                currentArm = arm
-                onChange(arm)
-            } catch {
-                log("transfers \(remoteID.uuidString) could not set \(arm), keeping \(currentArm)")
-            }
-        case .finished(let batch):
-            guard let batch else {
+        case nil:
+            let idle = !tracker.isActive && !queue.queue.contains { !TransferProgress.isSidecar($0.name ?? "") }
+            if needsPrepare, idle { await prepareNext() }
+        case .started(let files, let bytes)?:
+            let actual = WorkloadBucket.bucket(bytes: bytes, fileCount: files,
+                                               smallFileThreshold: bandit.configuration.smallFileThreshold)
+            // The arm was chosen while idle, for the previous workload; the batch keeps it and is credited to it
+            // under the bucket it really is (an arm is never changed mid-batch).
+            bucket = actual
+            armAtStart = currentArm
+            needsPrepare = false
+        case .finished(let batch)?:
+            let startArm = armAtStart
+            armAtStart = nil
+            if let batch, let startArm, startArm == currentArm {
+                bandit.record(batch, arm: startArm, bucket: bucket)
+                do { try store.save(bandit.state, remote: remoteID.uuidString) }
+                catch { log("transfers \(remoteID.uuidString) could not save state") }
+            } else if batch != nil {
+                log("transfers \(remoteID.uuidString) batch discarded (arm changed during it)")
+            } else {
                 log("transfers \(remoteID.uuidString) batch ignored (stalled or no counter)")
-                return
             }
-            bandit.record(batch, arm: currentArm, bucket: bucket)
-            do { try store.save(bandit.state, remote: remoteID.uuidString) }
-            catch { log("transfers \(remoteID.uuidString) could not save state") }
+            needsPrepare = true
+            if queue.queue.allSatisfy({ TransferProgress.isSidecar($0.name ?? "") }) { await prepareNext() }
+        }
+    }
+
+    /// Chooses the arm for the next batch and puts it in force now, while nothing is uploading.
+    private func prepareNext() async {
+        needsPrepare = false
+        let arm = bandit.chooseArm(for: bucket)
+        guard arm != currentArm else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            try await client.setTransfers(arm)
+            log("transfers \(remoteID.uuidString) bucket=\(bucket.rawValue) \(currentArm) -> \(arm)")
+            currentArm = arm
+            onChange(arm)
+        } catch {
+            log("transfers \(remoteID.uuidString) could not set \(arm), keeping \(currentArm)")
         }
     }
 }

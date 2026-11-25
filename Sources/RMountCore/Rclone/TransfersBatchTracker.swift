@@ -3,7 +3,9 @@ import Foundation
 /// Turns the stream of `vfs/queue` + `core/stats` samples into upload batches for the `TransfersBandit`.
 ///
 /// A batch starts when the queue goes empty -> non-empty and ends when it drains. Pure: the caller passes
-/// the clock. Bytes are the growth of rclone's cumulative `core/stats` counter (capped by the queued file
+/// the clock. The batch's duration runs from the last sample before the byte counter first moved (so the
+/// write-back delay before uploads begin, and a late first look at the queue, do not count against the arm);
+/// a poll every second or so keeps that error small. Bytes are the growth of rclone's cumulative `core/stats` counter (capped by the queued file
 /// sizes, so a download that runs meanwhile cannot inflate the reward).
 ///
 /// Rate limits: rclone's pacer retries 429s silently, so a rising `tries` count in the queue or a rising
@@ -23,6 +25,10 @@ public struct TransfersBatchTracker {
 
     private struct Active {
         var start: Date
+        /// When the first bytes started to move (the sample just before the counter first advanced).
+        var clockStart: Date?
+        /// Time of the previous sample, to back-date `clockStart`.
+        var prevTime: Date
         var lastProgress: Date
         var lastCounter: Int64?
         var counted: Int64 = 0
@@ -34,6 +40,9 @@ public struct TransfersBatchTracker {
         var stalled = false
     }
     private var active: Active?
+    /// The byte counter at the last sample that saw an empty queue: bytes moved before the batch was first
+    /// seen (an idle poll can lag) are counted from here.
+    private var idleMark: (time: Date, counter: Int64)?
 
     public var isActive: Bool { active != nil }
 
@@ -48,9 +57,17 @@ public struct TransfersBatchTracker {
     public mutating func observe(queue: VFSQueue, stats: RcloneStats?, now: Date) -> Event? {
         let entries = queue.queue.filter { !TransferProgress.isSidecar($0.name ?? "") }
         if active == nil {
-            guard !entries.isEmpty else { return nil }
-            var a = Active(start: now, lastProgress: now, lastCounter: stats?.bytes)
+            guard !entries.isEmpty else {
+                idleMark = stats?.bytes.map { (now, $0) }
+                return nil
+            }
+            var a = Active(start: now, prevTime: now, lastProgress: now, lastCounter: stats?.bytes)
             a.baselineErrors = stats?.errors
+            if let mark = idleMark, let counter = stats?.bytes, counter >= mark.counter {
+                a.lastCounter = mark.counter
+                a.prevTime = mark.time
+            }
+            idleMark = nil
             active = a
             absorb(entries, stats: stats, now: now)
             let a2 = active!
@@ -60,11 +77,13 @@ public struct TransfersBatchTracker {
         guard var a = active else { return nil }
         if entries.isEmpty {
             active = nil
+            idleMark = stats?.bytes.map { (now, $0) }
             if a.stalled || a.lastCounter == nil { return .finished(nil) }
             let queued = a.files.values.reduce(0, +)
             let bytes = queued > 0 ? min(a.counted, queued) : a.counted
-            let end = a.lastProgress > a.start ? a.lastProgress : now
-            return .finished(UploadBatch(bytes: bytes, duration: end.timeIntervalSince(a.start),
+            let begin = a.clockStart ?? a.start
+            let end = a.lastProgress > begin ? a.lastProgress : now
+            return .finished(UploadBatch(bytes: bytes, duration: end.timeIntervalSince(begin),
                                          fileCount: a.files.count,
                                          rateLimited: a.throttled || (a.retried && !a.failed),
                                          failed: a.failed))
@@ -90,6 +109,7 @@ public struct TransfersBatchTracker {
         if let counter = stats?.bytes {
             if let last = a.lastCounter {
                 if counter > last {
+                    if a.clockStart == nil { a.clockStart = a.prevTime }
                     a.counted += counter - last
                     a.lastProgress = now
                     a.stalled = false
@@ -107,6 +127,7 @@ public struct TransfersBatchTracker {
                 a.baselineErrors = errors
             }
         }
+        a.prevTime = now
         active = a
     }
 }

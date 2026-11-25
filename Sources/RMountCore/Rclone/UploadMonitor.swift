@@ -131,8 +131,10 @@ public struct URLSessionRcloneControlClient: RcloneControlClient {
 @MainActor
 final class UploadMonitor {
     struct Intervals {
-        var pending: TimeInterval = 2.5
-        var idle: TimeInterval = 15
+        /// While files are queued or uploading: fast enough to time a batch to within a second or two.
+        var pending: TimeInterval = 1.5
+        /// Nothing queued: a lazy poll, but short enough that a batch is seen soon after it starts.
+        var idle: TimeInterval = 5
         func delay(for status: UploadStatus) -> TimeInterval { status.hasPending ? pending : idle }
     }
 

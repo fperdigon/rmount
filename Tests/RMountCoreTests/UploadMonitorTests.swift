@@ -146,8 +146,8 @@ final class UploadMonitorTests: DebugTestCase {
         let client = FakeControlClient(pending)
         var statuses: [UploadStatus] = []
         let intervals = UploadMonitor.Intervals(pending: 0.01, idle: 0.15)
-        XCTAssertEqual(UploadMonitor.Intervals().delay(for: pending.status), 2.5)
-        XCTAssertEqual(UploadMonitor.Intervals().delay(for: UploadStatus()), 15)
+        XCTAssertEqual(UploadMonitor.Intervals().delay(for: pending.status), 1.5)
+        XCTAssertEqual(UploadMonitor.Intervals().delay(for: UploadStatus()), 5)
         let monitor = UploadMonitor(client: client, intervals: intervals) { statuses.append($0) }
         let sawPendingPolls = try await waitUntil {
             await client.calls > 2
