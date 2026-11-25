@@ -8,7 +8,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Parallel uploads (`--transfers`) are now tuned per remote automatically: RMount starts at 4 (8 for cloud storage such as S3, Azure, B2, Google Cloud and Google Drive), measures your own upload batches from rclone's transfer records, mostly uses the fastest value and tries a neighbouring one for about one batch in five so it keeps following your connection (backing off on rate limits, capped at 8 for Google Drive), and shows the current value in the Transfers window. Turn it off per remote under Performance > Uploads. (#123)
+- Parallel uploads (`--transfers`) are now tuned per remote automatically and re-evaluated every minute while uploading: RMount starts at 4 (8 for cloud storage such as S3, Azure, B2, Google Cloud and Google Drive), measures the real upload speed of each minute, mostly uses the fastest value and tries another one (usually a neighbour, sometimes any) in about one minute in five, so a long copy keeps following your connection (backing off on rate limits, capped at 8 for Google Drive). The current value shows in the Transfers window. Turn it off per remote under Performance > Uploads. (#123)
 
 ### Fixed
 

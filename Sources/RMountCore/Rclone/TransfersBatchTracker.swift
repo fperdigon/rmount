@@ -80,6 +80,15 @@ public struct TransfersBatchTracker {
         return nil
     }
 
+    /// Rate-limit and failure signals seen since the last call (then cleared), so each time slice gets its own.
+    public mutating func takeFlags() -> (rateLimited: Bool, failed: Bool) {
+        guard var a = active else { return (false, false) }
+        let flags = (a.throttled || (a.retried && !a.failed), a.failed)
+        a.throttled = false; a.retried = false; a.failed = false
+        active = a
+        return flags
+    }
+
     private mutating func absorb(_ entries: [VFSQueue.Entry], stats: RcloneStats?, now: Date) {
         guard var a = active else { return }
         for e in entries {

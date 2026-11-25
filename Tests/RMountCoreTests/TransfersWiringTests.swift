@@ -192,7 +192,7 @@ final class TransfersControllerTests: XCTestCase {
 
     private func stats(_ b: Int64) -> RcloneStats { RcloneStats(bytes: b) }
 
-    private func runBatch(_ c: TransfersController, bytes: Int64 = 600_000_000, seconds: TimeInterval = 60) async {
+    private func runBatch(_ c: TransfersController, bytes: Int64 = 600_000_000, seconds: TimeInterval = 40) async {
         let q = VFSQueue(queue: [entry(1, size: bytes)])
         await c.observe(queue: q, stats: stats(0))
         now = now.addingTimeInterval(seconds)
@@ -208,21 +208,21 @@ final class TransfersControllerTests: XCTestCase {
         var applied = await client.applied
         XCTAssertTrue(applied.isEmpty)
         await runBatch(c)
-        // The batch drained: the next arm (closest neighbour of the prior) is set now, with the queue empty.
+        // The batch drained: the next arm (closest neighbour of the prior, 3) is set now, with the queue empty.
         applied = await client.applied
-        XCTAssertEqual(applied, [2])
-        XCTAssertEqual(c.currentArm, 2)
-        XCTAssertTrue(logs.contains { $0.contains("4 -> 2") })
+        XCTAssertEqual(applied, [3])
+        XCTAssertEqual(c.currentArm, 3)
+        XCTAssertTrue(logs.contains { $0.contains("4 -> 3") })
         // The following batch starts without any change and is credited to arm 2.
         await runBatch(c)
         applied = await client.applied
-        XCTAssertEqual(applied.first, 2)
-        XCTAssertEqual(c.bandit.stats(for: .large, arm: 2)?.count, 1)
+        XCTAssertEqual(applied.first, 3)
+        XCTAssertEqual(c.bandit.stats(for: .large, arm: 3)?.count, 1)
         XCTAssertEqual(c.bandit.stats(for: .large, arm: 4)?.count, 1)
     }
 
     func testIdleSampleAtStartupAppliesTheChoiceAfterRestart() async throws {
-        // A remote that already measured arm 4 (and has arm 2 next to probe): the probe is applied on the first idle sample.
+        // A remote that already measured arm 4 (and has arm 3 next to probe): the probe is applied on the first idle sample.
         let remote = makeRemote(backend: sftpBackend())
         var seed = TransfersBandit(clock: { self.now }, random: { 0.99 })
         seed.record(UploadBatch(bytes: 600_000_000, duration: 30, fileCount: 6), arm: 4)
@@ -231,8 +231,8 @@ final class TransfersControllerTests: XCTestCase {
         let c = make(remote, client: client)
         await c.observe(queue: VFSQueue(), stats: stats(0))
         let applied = await client.applied
-        XCTAssertEqual(applied, [2])
-        XCTAssertEqual(c.currentArm, 2)
+        XCTAssertEqual(applied, [3])
+        XCTAssertEqual(c.currentArm, 3)
     }
 
     func testNothingIsAppliedWhileABatchIsRunning() async {
@@ -249,7 +249,7 @@ final class TransfersControllerTests: XCTestCase {
         await c.observe(queue: VFSQueue(), stats: stats(600_000_000))
         XCTAssertEqual(c.bandit.stats(for: .large, arm: 4)?.count, 1)
         applied = await client.applied
-        XCTAssertEqual(applied, [2])      // chosen only once the queue drained
+        XCTAssertEqual(applied, [3])      // chosen only once the queue drained
     }
 
     func testNoApplyWhenArmUnchanged() async {
@@ -274,34 +274,6 @@ final class TransfersControllerTests: XCTestCase {
         XCTAssertTrue(logs.contains { $0.contains("could not set") })
     }
 
-    func testArmChangedDuringABatchDiscardsTheSample() async {
-        let client = TransfersClient()
-        let c = make(makeRemote(backend: sftpBackend()), client: client)
-        let q = VFSQueue(queue: [entry(1, size: 600_000_000)])
-        await c.observe(queue: q, stats: stats(0))
-        now = now.addingTimeInterval(30)
-        await c.observe(queue: q, stats: stats(300_000_000))
-        c.currentArm = 8                                       // e.g. changed from outside mid-batch
-        now = now.addingTimeInterval(30)
-        await c.observe(queue: VFSQueue(), stats: stats(600_000_000))
-        XCTAssertNil(c.bandit.stats(for: .large, arm: 4))
-        XCTAssertNil(c.bandit.stats(for: .large, arm: 8))
-        XCTAssertTrue(logs.contains { $0.contains("discarded") })
-    }
-
-    func testBatchOfAnotherBucketIsCreditedToTheArmItRanWith() async {
-        let client = TransfersClient()
-        let c = make(makeRemote(backend: sftpBackend()), client: client)
-        let files = (1...200).map { entry(UInt64($0), size: 500_000) }     // small files: avg 0.5 MB
-        let q = VFSQueue(queue: files)
-        await c.observe(queue: q, stats: stats(0))
-        now = now.addingTimeInterval(120)
-        await c.observe(queue: q, stats: stats(100_000_000))
-        await c.observe(queue: VFSQueue(), stats: stats(100_000_000))
-        XCTAssertEqual(c.bandit.stats(for: .small, arm: 4)?.count, 1)
-        XCTAssertNil(c.bandit.stats(for: .large, arm: 4))
-    }
-
     func testFinishedBatchIsRecordedAndPersisted() async throws {
         let client = TransfersClient()
         let remote = makeRemote(backend: sftpBackend())
@@ -309,39 +281,7 @@ final class TransfersControllerTests: XCTestCase {
         await runBatch(c)
         let saved = try XCTUnwrap(TransfersBanditStore(directory: dir).load(remote: remote.id.uuidString))
         XCTAssertEqual(saved.buckets["large"]?.stats["4"]?.count, 1)
-        XCTAssertEqual(try XCTUnwrap(saved.buckets["large"]?.stats["4"]).mean, 10, accuracy: 0.01)   // 600 MB / 60 s
-    }
-
-    /// The VM scenario: 600 MB batches at 2 -> 10, 4 -> 20, 8 -> 40 MB/s, driven through the controller.
-    func testControllerFindsTheFastArmThroughTheWholePipeline() async {
-        let client = TransfersClient()
-        let rng = SeededUnitRandom(seed: 5)
-        let c = make(makeRemote(backend: s3Backend()), arm: 4, client: client, random: { rng.next() })
-        let curve: [Int: Double] = [2: 10, 4: 20, 8: 40, 12: 32, 16: 25]
-        var armsUsed: [Int] = []
-        for _ in 0..<40 {
-            let arm = c.currentArm
-            armsUsed.append(arm)
-            await runBatch(c, bytes: 600_000_000, seconds: 600 / curve[arm]!)
-            now = now.addingTimeInterval(30)
-            await c.observe(queue: VFSQueue(), stats: stats(0))
-        }
-        XCTAssertTrue(armsUsed.prefix(10).contains(8), "\(armsUsed)")
-        let tail = armsUsed.dropFirst(10)
-        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 8 }.count) / Double(tail.count), 0.7, "\(armsUsed)")
-    }
-
-    func testStalledBatchIsNotPersisted() async {
-        let client = TransfersClient()
-        let remote = makeRemote(backend: sftpBackend())
-        let c = make(remote, client: client)
-        let q = VFSQueue(queue: [entry(1)])
-        await c.observe(queue: q, stats: stats(0))
-        now = now.addingTimeInterval(200)
-        await c.observe(queue: q, stats: stats(0))
-        await c.observe(queue: VFSQueue(), stats: stats(0))
-        XCTAssertNil(TransfersBanditStore(directory: dir).load(remote: remote.id.uuidString))
-        XCTAssertTrue(logs.contains { $0.contains("ignored") })
+        XCTAssertEqual(try XCTUnwrap(saved.buckets["large"]?.stats["4"]).mean, 15, accuracy: 0.01)   // 600 MB / 40 s
     }
 
     func testStartupArmUsesPriorThenBestMeasured() throws {
@@ -356,9 +296,9 @@ final class TransfersControllerTests: XCTestCase {
 
     func testDriveArmsAreCappedAtEight() {
         let config = BanditConfiguration.forBackend("drive")
-        XCTAssertEqual(config.arms, [2, 4, 8])
+        XCTAssertEqual(config.arms, [1, 2, 3, 4, 6, 8])
         XCTAssertEqual(config.startingArm, 8)
-        XCTAssertEqual(BanditConfiguration.forBackend("sftp").arms, [2, 4, 8, 12, 16])
+        XCTAssertEqual(BanditConfiguration.forBackend("sftp").arms, BanditConfiguration.defaultArms)
         let drive = makeRemote(backend: driveBackend())
         XCTAssertEqual(drive.transfersBackendID, "drive")
         XCTAssertEqual(TransfersController.startupArm(for: drive, store: TransfersBanditStore(directory: dir)), 8)
@@ -517,6 +457,13 @@ final class TransfersSessionTests: XCTestCase {
 
 // MARK: - Records (core/transferred)
 
+/// Throughput of a link whose best `--transfers` is `peak`: 40 MB/s there, 8 MB/s less per arm step away (at least 5).
+private func peakRate(_ arm: Int, peak: Int) -> Double {
+    let arms = BanditConfiguration.defaultArms
+    let d = abs((arms.firstIndex(of: arm) ?? 0) - (arms.firstIndex(of: peak) ?? 0))
+    return max(5, 40 - 8 * Double(d))
+}
+
 private let t0 = Date(timeIntervalSince1970: 1_700_000_000)
 private func rec(_ name: String, _ start: TimeInterval, _ end: TimeInterval, bytes: Int64 = 100_000_000,
                  error: String = "") -> CompletedTransfer {
@@ -656,41 +603,19 @@ final class TransfersRecordsControllerTests: XCTestCase {
         await poll(c, [])
         now = t0.addingTimeInterval(15)
         let first = rec("f", 2, 14.5, bytes: 600_000_000)
-        await poll(c, [first], bytes: 600_000_000)           // credited to 4; arm 2 is applied now (t0+15)
-        XCTAssertEqual(c.currentArm, 2)
+        await poll(c, [first], bytes: 600_000_000)           // credited to 4; arm 3 is applied now (t0+15)
+        XCTAssertEqual(c.currentArm, 3)
         now = t0.addingTimeInterval(25)
         let straddling = rec("g", 10, 20, bytes: 300_000_000)   // started before the change at 15, ended after it
         await poll(c, [first, straddling], bytes: 900_000_000)
         XCTAssertEqual(c.bandit.stats(for: .large, arm: 4)?.count, 1)
-        XCTAssertNil(c.bandit.stats(for: .large, arm: 2))
+        XCTAssertNil(c.bandit.stats(for: .large, arm: 3))
         XCTAssertTrue(logs.contains { $0.contains("discarded") })
         now = t0.addingTimeInterval(60)
         let later = rec("h", 40, 50, bytes: 100_000_000)
         await poll(c, [first, straddling, later], bytes: 1_000_000_000)
-        XCTAssertEqual(c.bandit.stats(for: .large, arm: 2)?.count, 1)
-        XCTAssertEqual(c.bandit.stats(for: .large, arm: 2)!.mean, 10, accuracy: 0.5)
-    }
-
-    func testRecordsFlowNoMoreFallsBackToTimingFromPollsOnlyBeforeAnyBatchWasBuilt() async {
-        let client = TransfersClient()
-        let c = make(client: client)
-        // Empty (not missing) records: the polled batch is used.
-        let q = VFSQueue(queue: [entry(1, size: 600_000_000)])
-        await c.observe(queue: q, stats: RcloneStats(bytes: 0), transferred: [])
-        now = now.addingTimeInterval(30)
-        await c.observe(queue: q, stats: RcloneStats(bytes: 300_000_000), transferred: [])
-        now = now.addingTimeInterval(30)
-        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 600_000_000), transferred: [])
-        XCTAssertEqual(c.bandit.stats(for: .large, arm: 4)?.count, 1)
-        // Once records produce batches, a polled finish is not counted a second time.
-        now = now.addingTimeInterval(100)
-        let q2 = VFSQueue(queue: [entry(2, size: 600_000_000)])
-        await c.observe(queue: q2, stats: RcloneStats(bytes: 600_000_000), transferred: [])
-        now = now.addingTimeInterval(20)
-        let r = rec("x", 130, 148, bytes: 600_000_000)
-        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 1_200_000_000), transferred: [r])
-        let total = [2, 4, 8].compactMap { c.bandit.stats(for: .large, arm: $0)?.count }.reduce(0, +)
-        XCTAssertEqual(total, 2)
+        XCTAssertEqual(c.bandit.stats(for: .large, arm: 3)?.count, 1)
+        XCTAssertEqual(c.bandit.stats(for: .large, arm: 3)!.mean, 10, accuracy: 0.5)
     }
 
     func testStalledVerdictFromThePollsDropsTheRecordedBatch() async {
@@ -718,7 +643,7 @@ final class TransfersRecordsControllerTests: XCTestCase {
 
     /// Replays 600 MB batches against a throughput curve through the controller, using only rclone-style
     /// records; the poll comes `delay` seconds (0-15) after each batch, as an idle poll would.
-    private func replay(_ c: TransfersController, curve: [Int: Double], batches: Int) async -> [Int] {
+    private func replay(_ c: TransfersController, peak: Int, batches: Int) async -> [Int] {
         var arms: [Int] = []
         var all: [CompletedTransfer] = []
         var clockTime = 100.0
@@ -726,7 +651,7 @@ final class TransfersRecordsControllerTests: XCTestCase {
             let arm = c.currentArm
             arms.append(arm)
             let start = clockTime + 1
-            let end = start + 600 / curve[arm]!
+            let end = start + 600 / peakRate(arm, peak: peak)
             all.append(rec("b\(i)", start, end, bytes: 600_000_000))
             clockTime = end + Double(i % 11) * 1.5
             now = t0.addingTimeInterval(clockTime)
@@ -738,25 +663,25 @@ final class TransfersRecordsControllerTests: XCTestCase {
 
     func testReachesArm8ForTheVMCurveWhateverTheFirstSightingDelay() async throws {
         let c = make(client: TransfersClient())
-        let curve: [Int: Double] = [2: 10, 4: 20, 8: 40, 12: 32, 16: 25]
-        let arms = await replay(c, curve: curve, batches: 50)
-        XCTAssertTrue(arms.prefix(10).contains(8), "\(arms)")
+        let arms = await replay(c, peak: 8, batches: 60)
+        XCTAssertTrue(arms.prefix(14).contains(8), "\(arms)")
         XCTAssertEqual(c.bandit.bestArm(for: .large), 8)
-        let tail = arms.dropFirst(10)
-        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 8 }.count) / Double(tail.count), 0.7, "\(arms)")
-        for (arm, mbps) in curve {
-            if let s = c.bandit.stats(for: .large, arm: arm) { XCTAssertEqual(s.mean, mbps, accuracy: mbps * 0.05, "arm \(arm)") }
+        let tail = arms.dropFirst(14)
+        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 8 }.count) / Double(tail.count), 0.65, "\(arms)")
+        for arm in BanditConfiguration.defaultArms {
+            if let s = c.bandit.stats(for: .large, arm: arm) {
+                XCTAssertEqual(s.mean, peakRate(arm, peak: 8), accuracy: peakRate(arm, peak: 8) * 0.05, "arm \(arm)")
+            }
         }
     }
 
     func testReachesArm16WhenMoreParallelismKeepsHelping() async throws {
         let c = make(backend: s3Backend(), arm: 8, client: TransfersClient())
-        let curve: [Int: Double] = [2: 5, 4: 10, 8: 20, 12: 30, 16: 40]
-        let arms = await replay(c, curve: curve, batches: 60)
-        XCTAssertTrue(arms.prefix(14).contains(16), "\(arms)")
+        let arms = await replay(c, peak: 16, batches: 70)
+        XCTAssertTrue(arms.prefix(16).contains(16), "\(arms)")
         XCTAssertEqual(c.bandit.bestArm(for: .large), 16)
-        let tail = arms.dropFirst(14)
-        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 16 }.count) / Double(tail.count), 0.7, "\(arms)")
+        let tail = arms.dropFirst(16)
+        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 16 }.count) / Double(tail.count), 0.65, "\(arms)")
     }
 }
 
@@ -789,5 +714,226 @@ final class UploadMonitorRecordsTests: XCTestCase {
         XCTAssertEqual(client.fetches, first + 2)
         XCTAssertEqual(got.last, true)
         monitor.stop()
+    }
+}
+
+// MARK: - Time slices
+
+final class TransfersSliceMeterTests: XCTestCase {
+    private func at(_ s: TimeInterval) -> Date { t0.addingTimeInterval(s) }
+    private func feed(_ m: inout TransfersSliceMeter, _ points: [(TimeInterval, Int64)], contaminated: Bool = false) {
+        for (t, b) in points { m.sample(time: at(t), bytes: b, contaminated: contaminated, rateLimited: false, failed: false) }
+    }
+
+    func testRewardIsBytesOverTheMeasuredTimeEndingAtTheLastProgress() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0), (1.5, 15_000_000), (30, 600_000_000), (60, 1_200_000_000), (61.5, 1_200_000_000)])
+        let r = m.finish()
+        XCTAssertEqual(r?.bytes, 1_200_000_000)
+        XCTAssertEqual(r!.duration, 60, accuracy: 0.001)
+        XCTAssertFalse(m.isActive)
+    }
+
+    func testWarmupAfterAnArmChangeIsSkipped() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(100), warmup: 10)
+        // Slow while the old concurrency drains, then 40 MB/s with the new arm.
+        feed(&m, [(101.5, 1_000_000), (105, 5_000_000), (110, 10_000_000), (111.5, 70_000_000), (160, 2_010_000_000)])
+        let r = m.finish()
+        XCTAssertEqual(r?.bytes, 2_000_000_000)                       // from the sample at 110 s
+        XCTAssertEqual(r!.duration, 50, accuracy: 0.001)
+        XCTAssertEqual(r!.bytes.asMBps(r!.duration), 40, accuracy: 2)
+    }
+
+    func testSliceCarriedOnWithoutAChangeStartsFromTheCounter() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(60), warmup: 0, baseline: 600_000_000)
+        feed(&m, [(90, 1_200_000_000), (120, 1_800_000_000)])
+        XCTAssertEqual(m.finish()?.bytes, 1_200_000_000)
+    }
+
+    func testStalledContaminatedAndEmptySlicesYieldNothing() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0), (10, 100), (40, 100), (41, 200)])               // 30 s without progress
+        XCTAssertNil(m.finish())
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0), (30, 900_000_000)], contaminated: true)         // a download ran too
+        XCTAssertNil(m.finish())
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0), (30, 0)])
+        XCTAssertNil(m.finish())
+        m.begin(at: at(0), warmup: 0)
+        m.sample(time: at(0), bytes: nil, contaminated: false, rateLimited: false, failed: false)
+        XCTAssertNil(m.finish())
+        XCTAssertNil(m.finish())                                           // no slice running
+    }
+
+    func testCounterResetDropsTheSlice() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 900_000_000), (10, 5)])
+        XCTAssertNil(m.finish())
+    }
+
+    func testRateLimitAlwaysYieldsAPenaltyReading() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(0), warmup: 0)
+        m.sample(time: at(0), bytes: 0, contaminated: false, rateLimited: true, failed: false)
+        XCTAssertEqual(m.finish()?.rateLimited, true)
+        m.begin(at: at(0), warmup: 0)
+        XCTAssertEqual(m.finish(extraRateLimited: true)?.rateLimited, true)
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0), (20, 400_000_000)])
+        XCTAssertEqual(m.finish(extraFailed: true)?.failed, true)
+    }
+
+    func testDueAfterTheSliceLength() {
+        var m = TransfersSliceMeter()
+        XCTAssertFalse(m.isDue(now: at(1000)))
+        m.begin(at: at(0), warmup: 0)
+        XCTAssertFalse(m.isDue(now: at(59)))
+        XCTAssertTrue(m.isDue(now: at(60)))
+        m.sample(time: at(0), bytes: 5, contaminated: false, rateLimited: false, failed: false)
+        XCTAssertEqual(m.lastBytes, 5)
+    }
+}
+
+private extension Int64 {
+    func asMBps(_ seconds: TimeInterval) -> Double { Double(self) / 1_000_000 / seconds }
+}
+
+@MainActor
+final class TransfersSliceControllerTests: XCTestCase {
+    private var dir: URL!
+    private var now = t0
+    private var logs: [String] = []
+    override func setUpWithError() throws { dir = try makeTempDir() }
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: dir) }
+
+    private func make(backend: Backend = sftpBackend(), arm: Int = 4, client: TransfersClient, seed: UInt64 = 5) -> TransfersController {
+        let rng = SeededUnitRandom(seed: seed)
+        return TransfersController(remote: makeRemote(backend: backend), startingArm: arm,
+                                   store: TransfersBanditStore(directory: dir), client: client, random: { rng.next() },
+                                   clock: { [unowned self] in self.now }, log: { [unowned self] in self.logs.append($0) })
+    }
+
+    /// One long copy, polled every 1.5 s. Throughput follows `rate(arm, seconds)`; after an arm change the old
+    /// arm's rate carries on for 10 s (running uploads keep their concurrency). Returns the arm at each slice start.
+    private func longCopy(_ c: TransfersController, seconds: Double, check: ((Double) -> Void)? = nil, rate: (Int, Double) -> Double) async -> [(time: Double, arm: Int)] {
+        let q = VFSQueue(queue: [entry(1, size: 500_000_000_000)])
+        var counter = 0.0
+        var t = 0.0
+        var simArm = c.currentArm, prevArm = c.currentArm, changedAt = -100.0
+        var changes: [(Double, Int)] = [(0, c.currentArm)]
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0))
+        while t < seconds {
+            t += 1.5
+            if c.currentArm != simArm { prevArm = simArm; simArm = c.currentArm; changedAt = t; changes.append((t, simArm)) }
+            let effective = t - changedAt < 10 ? prevArm : simArm
+            counter += rate(effective, t) * 1.5 * 1_000_000
+            now = t0.addingTimeInterval(t)
+            await c.observe(queue: q, stats: RcloneStats(bytes: Int64(counter)))
+            check?(t)
+        }
+        return changes.map { (time: $0.0, arm: $0.1) }
+    }
+
+    func testALongCopyReEvaluatesEveryMinuteAndFollowsABestArmThatMovesMidCopy() async throws {
+        let client = TransfersClient()
+        let c = make(client: client, seed: 9)
+        // 40 minutes in one copy; the best arm moves from 4 to 6 after 20 minutes.
+        var bestBefore = 0
+        _ = await longCopy(c, seconds: 2400, check: { t in
+            if t >= 1200 && t < 1201.5 { bestBefore = c.bandit.bestArm(for: .large) }
+        }) { arm, t in peakRate(arm, peak: t < 1200 ? 4 : 6) }
+        XCTAssertEqual(bestBefore, 4)
+        XCTAssertEqual(c.bandit.bestArm(for: .large), 6)
+        let counts = BanditConfiguration.defaultArms.compactMap { c.bandit.stats(for: .large, arm: $0)?.count }
+        XCTAssertGreaterThanOrEqual(counts.reduce(0, +), 30)           // about one sample per minute, over a single copy
+        let applied = await client.applied
+        XCTAssertGreaterThan(applied.count, 5)                          // the arm changed during the copy
+    }
+
+    func testExplorationRateIsAboutOneSliceInFiveWithJumpsAndRewardsAreAccurate() async throws {
+        let client = TransfersClient()
+        let c = make(client: client, seed: 21)
+        _ = await longCopy(c, seconds: 4800) { arm, _ in peakRate(arm, peak: 8) }        // 80 slices
+        XCTAssertEqual(c.bandit.bestArm(for: .large), 8)
+        let arms = BanditConfiguration.defaultArms
+        var total = 0, onBest = 0, far = 0
+        for a in arms {
+            guard let s = c.bandit.stats(for: .large, arm: a) else { continue }
+            total += s.count
+            if a == 8 { onBest = s.count }
+            if abs(arms.firstIndex(of: a)! - arms.firstIndex(of: 8)!) >= 2 { far += s.count }
+            XCTAssertEqual(s.mean, peakRate(a, peak: 8), accuracy: peakRate(a, peak: 8) * 0.05, "arm \(a)")
+        }
+        XCTAssertGreaterThanOrEqual(total, 70)
+        XCTAssertEqual(Double(total - onBest) / Double(total), 0.2, accuracy: 0.14)     // includes the cold start's probes
+        XCTAssertGreaterThan(far, 0)                                                     // uniform jumps happen
+    }
+
+    func testFirstSlicesStayNearThePriorAndADriveRemoteNeverExceedsEight() async throws {
+        let client = TransfersClient()
+        let c = make(client: client, seed: 3)
+        let changes = await longCopy(c, seconds: 600) { arm, _ in peakRate(arm, peak: 4) }
+        XCTAssertTrue(changes.prefix(3).allSatisfy { [3, 4, 6].contains($0.arm) }, "\(changes)")
+        let drive = TransfersController.startupArm(for: makeRemote(backend: driveBackend()),
+                                                   store: TransfersBanditStore(directory: dir))
+        XCTAssertEqual(drive, 8)
+        let cap = BanditConfiguration.forBackend("drive")
+        XCTAssertEqual(cap.arms.max(), 8)
+        let d = TransfersController(remote: makeRemote(backend: driveBackend()),
+                                    startingArm: 8, store: TransfersBanditStore(directory: dir), client: TransfersClient(),
+                                    random: { 0.5 }, clock: { [unowned self] in self.now }, log: { _ in })
+        XCTAssertEqual(d.bandit.configuration.arms.max(), 8)
+    }
+
+    func testSlicesInsideOneLongFileStillMeasure() async throws {
+        let client = TransfersClient()
+        let c = make(client: client)
+        _ = await longCopy(c, seconds: 300) { _, _ in 20 }              // a single 500 GB file never completes
+        let counts = BanditConfiguration.defaultArms.compactMap { c.bandit.stats(for: .large, arm: $0)?.count }.reduce(0, +)
+        XCTAssertGreaterThanOrEqual(counts, 3)
+    }
+
+    func testADownloadDuringTheSliceDropsIt() async throws {
+        let c = make(client: TransfersClient())
+        let q = VFSQueue(queue: [entry(1, size: 500_000_000_000)])
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0))
+        now = now.addingTimeInterval(30)
+        let down = RcloneStats(transferring: [RcloneStats.Transfer(name: "movie.mkv", bytes: 1, size: 9)], bytes: 900_000_000)
+        await c.observe(queue: q, stats: down)
+        now = now.addingTimeInterval(31)
+        await c.observe(queue: q, stats: RcloneStats(bytes: 1_800_000_000))
+        XCTAssertNil(c.bandit.stats(for: .large, arm: 4))
+        XCTAssertTrue(logs.contains { $0.contains("slice ignored") })
+    }
+
+    func testRateLimitDuringASlicePenalisesItsArm() async throws {
+        let c = make(client: TransfersClient())
+        let q1 = VFSQueue(queue: [VFSQueue.Entry(name: "f", id: 1, size: 500_000_000_000, uploading: true, tries: 0)])
+        await c.observe(queue: q1, stats: RcloneStats(bytes: 0, errors: 0))
+        now = now.addingTimeInterval(20)
+        await c.observe(queue: q1, stats: RcloneStats(bytes: 400_000_000, errors: 1, lastError: "429 too many requests"))
+        now = now.addingTimeInterval(41)
+        await c.observe(queue: q1, stats: RcloneStats(bytes: 800_000_000, errors: 1, lastError: "429 too many requests"))
+        let s = try XCTUnwrap(c.bandit.stats(for: .large, arm: 4))
+        XCTAssertEqual(s.count, 1)
+        XCTAssertEqual(s.mean, 0, accuracy: 0.001)                       // mean 0 x 0.25: an unmeasured arm penalised
+    }
+
+    func testBatchOfAnotherBucketIsCreditedUnderItsBucket() async throws {
+        let c = make(client: TransfersClient())
+        let files = (1...200).map { entry(UInt64($0), size: 500_000) }
+        let q = VFSQueue(queue: files)
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0))
+        now = now.addingTimeInterval(40)
+        await c.observe(queue: q, stats: RcloneStats(bytes: 100_000_000))
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 100_000_000))
+        XCTAssertEqual(c.bandit.stats(for: .small, arm: 4)?.count, 1)
+        XCTAssertNil(c.bandit.stats(for: .large, arm: 4))
     }
 }
