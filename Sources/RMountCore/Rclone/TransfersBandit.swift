@@ -28,8 +28,23 @@ public enum WorkloadBucket: String, Codable, CaseIterable {
 /// EWMA of the reward (MB/s) of one arm, and how many batches fed it.
 public struct ArmStats: Codable, Equatable {
     public var mean: Double
+    /// Samples that fed the mean, penalties included.
     public var count: Int
-    public init(mean: Double = 0, count: Int = 0) { self.mean = mean; self.count = count }
+    /// Real measured throughput samples (no penalties): what an arm needs to be trusted below the safe floor.
+    public var real: Int
+    /// The mean before the current run of penalties began; a penalty never goes below a quarter of it.
+    public var unpenalised: Double?
+    public init(mean: Double = 0, count: Int = 0, real: Int? = nil, unpenalised: Double? = nil) {
+        self.mean = mean; self.count = count; self.real = real ?? count; self.unpenalised = unpenalised
+    }
+    private enum CodingKeys: String, CodingKey { case mean, count, real, unpenalised }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        mean = try c.decode(Double.self, forKey: .mean)
+        count = try c.decode(Int.self, forKey: .count)
+        real = (try? c.decodeIfPresent(Int.self, forKey: .real)) ?? count
+        unpenalised = try? c.decodeIfPresent(Double.self, forKey: .unpenalised)
+    }
 }
 
 public struct BucketState: Codable, Equatable {
@@ -86,6 +101,11 @@ public struct BanditConfiguration: Equatable {
     /// other arm whose mean is higher than that sample is pulled this far toward it, so a stale best arm cannot
     /// keep reading best. Arms are corrected upward again as soon as they are sampled.
     public var ageing: Double = 0.5
+    /// Below the safe floor an arm is only exploited after this many real samples beating the floor arm by this margin.
+    public var trustSamples: Int = 3
+    public var trustMargin: Double = 0.15
+    /// A penalty never takes an arm below this share of its pre-penalty mean.
+    public var penaltyFloor: Double = 0.25
     /// A batch counts when it lasted at least `minBatchDuration` and either moved `minBatchBytes` (a fast arm
     /// finishes a big batch quickly) or ran for `minLongBatchDuration` (a slow one moves fewer bytes).
     public var minBatchBytes: Int64 = 100_000_000
@@ -208,12 +228,24 @@ public struct TransfersBandit {
     }
 
     private func bestArm(in b: BucketState) -> Int {
-        var best: (arm: Int, mean: Double)?
-        for arm in arms {
-            guard let s = b.stats[String(arm)], s.count > 0 else { continue }
-            if best == nil || s.mean > best!.mean { best = (arm, s.mean) }
+        func top(_ candidates: [Int]) -> Int? {
+            var best: (arm: Int, mean: Double)?
+            for arm in candidates {
+                guard let s = b.stats[String(arm)], s.count > 0 else { continue }
+                if best == nil || s.mean > best!.mean { best = (arm, s.mean) }
+            }
+            return best?.arm
         }
-        return best?.arm ?? startArm()
+        let floor = startArm()
+        // Exploiting below the safe floor (the backend prior, never under 4) needs proof: at least `trustSamples`
+        // real measurements that beat the floor arm's own mean by `trustMargin`. Penalties and thin data cannot do it.
+        let floorMean = b.stats[String(floor)].flatMap { $0.count > 0 ? $0.mean : nil }
+        let eligible = arms.filter { arm in
+            if arm >= floor { return true }
+            guard let s = b.stats[String(arm)], s.real >= configuration.trustSamples, let f = floorMean else { return false }
+            return s.mean >= f * (1 + configuration.trustMargin)
+        }
+        return top(eligible) ?? floor
     }
 
     private func neighbours(of arm: Int) -> [Int] {
@@ -240,6 +272,8 @@ public struct TransfersBandit {
     /// Why `record` would ignore this batch (for the debug log), or nil when it counts.
     public func rejectionReason(for batch: UploadBatch, arm: Int) -> String? {
         if !arms.contains(arm) { return "arm \(arm) is not in the arm set" }
+        // Nothing measured says nothing about an arm: never a result, not even a penalty.
+        if batch.bytes <= 0 || batch.duration <= 0 { return "no data" }
         if batch.rateLimited { return nil }
         if batch.failed { return "failed (not a rate limit)" }
         if batch.duration < configuration.minBatchDuration { return "too short (\(Int(batch.duration)) s)" }
@@ -259,12 +293,18 @@ public struct TransfersBandit {
         var b = state.buckets[bucket.rawValue] ?? BucketState(lastExplored: clock())
         var s = b.stats[String(arm)] ?? ArmStats()
         var last: Double
+        guard rejectionReason(for: batch, arm: arm) == nil else { return }
+        let reward = Double(batch.bytes) / 1_000_000 / batch.duration
         if batch.rateLimited {
-            s.mean *= configuration.rateLimitFactor
+            // One penalty per slice, never below a quarter of the mean before the penalties began.
+            let base = s.unpenalised ?? (s.real > 0 ? s.mean : reward)
+            s.unpenalised = base
+            let current = s.real > 0 ? s.mean : reward
+            s.mean = max(current * configuration.rateLimitFactor, base * configuration.penaltyFloor)
             last = s.mean
         } else {
-            guard rejectionReason(for: batch, arm: arm) == nil else { return }
-            let reward = Double(batch.bytes) / 1_000_000 / batch.duration
+            s.unpenalised = nil
+            s.real += 1
             // Count-weighted: early samples average out, later ones follow the EWMA so a drifting link is tracked
             // while one bad sample cannot dominate.
             var weight = s.count == 0 ? 1 : max(configuration.ewmaAlpha, 1 / Double(s.count + 1))

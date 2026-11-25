@@ -61,7 +61,7 @@ final class TransfersBanditTests: XCTestCase {
 
     func testFastLinkPeaksLow() {
         var b = make(start: 8)
-        run(&b, 300) { 50 - 3 * Double($0) }   // sftp-like: fewer is better
+        run(&b, 1500) { 50 - 3 * Double($0) }   // sftp-like: fewer is better; each step below the floor must earn trust
         XCTAssertEqual(b.bestArm(for: .large), 1)
     }
 
@@ -113,7 +113,7 @@ final class TransfersBanditTests: XCTestCase {
 
     func testEdgeArmExploresItsOnlyNeighbourOrJumps() {
         var b = make(start: 4)
-        run(&b, 60) { $0 == 1 ? 50 : 5 }          // arm 1 is by far the best
+        run(&b, 1200) { $0 == 1 ? 50 : 5 }          // arm 1 is by far the best
         XCTAssertEqual(b.bestArm(for: .large), 1)
         var seen = Set<Int>()
         for _ in 0..<2000 { seen.insert(b.chooseArm(for: .large)) }
@@ -300,6 +300,54 @@ final class TransfersBanditTests: XCTestCase {
         XCTAssertNil(b.rejectionReason(for: UploadBatch(bytes: 1, duration: 1, fileCount: 1, rateLimited: true), arm: 4))
     }
 
+    func testNoDataIsNeverARecordNotEvenAPenalty() {
+        var b = make(start: 8)
+        for bad in [UploadBatch(bytes: 0, duration: 0, fileCount: 1, rateLimited: true),
+                    UploadBatch(bytes: 0, duration: 60, fileCount: 1, rateLimited: true),
+                    UploadBatch(bytes: 900_000_000, duration: 0, fileCount: 1, rateLimited: true),
+                    UploadBatch(bytes: 0, duration: 0, fileCount: 1)] {
+            XCTAssertEqual(b.rejectionReason(for: bad, arm: 8), "no data")
+            b.record(bad, arm: 8)
+        }
+        XCTAssertNil(b.stats(for: .large, arm: 8))
+        XCTAssertNil(b.state.buckets["large"])
+    }
+
+    func testAPenaltyNeverTakesAnArmBelowAQuarterOfItsPrePenaltyMean() {
+        var b = make(start: 8)
+        for _ in 0..<4 { b.record(batch(mbps: 40, seconds: 30), arm: 8) }
+        for _ in 0..<10 { b.record(UploadBatch(bytes: 100_000, duration: 10, fileCount: 1, rateLimited: true), arm: 8, bucket: .large) }
+        XCTAssertEqual(b.stats(for: .large, arm: 8)!.mean, 10, accuracy: 0.001)       // 25% of 40, not 40 x 0.25^10
+        b.record(batch(mbps: 40, seconds: 30), arm: 8)                                 // a healthy slice ends the run of penalties
+        XCTAssertNil(b.stats(for: .large, arm: 8)!.unpenalised)
+        XCTAssertEqual(b.stats(for: .large, arm: 8)!.real, 5)
+    }
+
+    func testPenaltiesAndThinDataCannotPushTheExploitedArmBelowTheFloor() {
+        var b = make(start: 8)
+        for _ in 0..<3 { b.record(batch(mbps: 30, seconds: 30), arm: 8) }
+        b.record(batch(mbps: 60, seconds: 30), arm: 4)                 // one great sample on a lower arm
+        b.record(batch(mbps: 60, seconds: 30), arm: 3)
+        for _ in 0..<5 { b.record(UploadBatch(bytes: 100_000_000, duration: 10, fileCount: 1, rateLimited: true), arm: 8, bucket: .large) }
+        XCTAssertEqual(b.stats(for: .large, arm: 8)!.mean, 7.5, accuracy: 0.001)
+        XCTAssertEqual(b.bestArm(for: .large), 8)                       // still the floor: no lower arm has 3 real samples
+        for _ in 0..<2 { b.record(batch(mbps: 60, seconds: 30), arm: 4) }
+        XCTAssertEqual(b.bestArm(for: .large), 4)                       // 3 real samples beating the prior's mean by 15%: trusted
+        var c = make(start: 8)                                          // a lower arm that does not beat the prior by 15% stays untrusted
+        for _ in 0..<5 { c.record(batch(mbps: 30, seconds: 30), arm: 8) }
+        for _ in 0..<5 { c.record(batch(mbps: 33, seconds: 30), arm: 6) }
+        XCTAssertEqual(c.bestArm(for: .large), 8)
+        var d = make(start: 8)                                          // nothing measured at the floor: still the floor
+        d.record(batch(mbps: 90, seconds: 30), arm: 3)
+        XCTAssertEqual(d.bestArm(for: .large), 8)
+    }
+
+    func testLegacyArmStatsDecodeWithRealSamplesEqualToCount() throws {
+        let s = try JSONDecoder().decode(ArmStats.self, from: Data(#"{"mean":12.5,"count":4}"#.utf8))
+        XCTAssertEqual(s.real, 4)
+        XCTAssertNil(s.unpenalised)
+    }
+
     func testRateLimitPenalisesEvenTinyBatches() {
         var b = make()
         b.record(batch(mbps: 10), arm: 8)
@@ -313,9 +361,9 @@ final class TransfersBanditTests: XCTestCase {
     func testBucketsAreIndependent() {
         var b = make()
         b.record(batch(mbps: 30, files: 2), arm: 12)          // large
-        b.record(batch(mbps: 5, files: 5000), arm: 2)         // small (avg 60 KB)
+        b.record(batch(mbps: 5, files: 5000), arm: 6)         // small (avg 60 KB)
         XCTAssertEqual(b.bestArm(for: .large), 12)
-        XCTAssertEqual(b.bestArm(for: .small), 2)
+        XCTAssertEqual(b.bestArm(for: .small), 6)
         XCTAssertNil(b.stats(for: .small, arm: 12))
     }
 
