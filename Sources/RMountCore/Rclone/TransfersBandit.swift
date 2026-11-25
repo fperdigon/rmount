@@ -134,6 +134,8 @@ public struct TransfersBandit {
     public private(set) var state: BanditState
     private let clock: () -> Date
     private let random: () -> Double
+    /// Buckets whose latest `chooseArm` handed out a systematic probe (so a failed apply can give it back).
+    private var probed: Set<String> = []
 
     /// `random` must return values in [0, 1).
     public init(configuration: BanditConfiguration = BanditConfiguration(), state: BanditState = BanditState(),
@@ -157,9 +159,11 @@ public struct TransfersBandit {
         var b = state.buckets[bucket.rawValue] ?? BucketState(lastExplored: clock())
         let best = bestArm(in: b)
         var chosen = best
+        probed.remove(bucket.rawValue)
         if let probe = probeTarget(b, best: best) {
             chosen = probe
             b.probes += 1
+            probed.insert(bucket.rawValue)
             b.lastExplored = clock()
         } else if configuration.epsilon > 0, random() < configuration.epsilon {
             // Mostly a step next to the best arm, sometimes a jump anywhere (a link can change a lot).
@@ -177,6 +181,14 @@ public struct TransfersBandit {
         }
         state.buckets[bucket.rawValue] = b
         return chosen
+    }
+
+    /// The arm chosen last for `bucket` could not be applied: give back the probe it used, so the same probe is
+    /// offered again at the next decision.
+    public mutating func retract(bucket: WorkloadBucket) {
+        guard probed.remove(bucket.rawValue) != nil, var b = state.buckets[bucket.rawValue], b.probes > 0 else { return }
+        b.probes -= 1
+        state.buckets[bucket.rawValue] = b
     }
 
     /// The arm with the highest mean, or the (snapped) starting arm when nothing was measured.

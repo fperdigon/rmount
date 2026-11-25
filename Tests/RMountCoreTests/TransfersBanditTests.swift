@@ -193,6 +193,21 @@ final class TransfersBanditTests: XCTestCase {
         XCTAssertEqual(b.chooseArm(for: .large), 8)
     }
 
+    func testARetractedProbeIsOfferedAgain() {
+        var b = make(start: 4)
+        let first = b.chooseArm(for: .large)
+        b.record(batch(mbps: 10, seconds: 30), arm: first)
+        let probe = b.chooseArm(for: .large)                         // a systematic probe of a neighbour
+        XCTAssertEqual(b.state.buckets["large"]?.probes, 2)
+        b.retract(bucket: .large)                                    // setTransfers failed
+        XCTAssertEqual(b.state.buckets["large"]?.probes, 1)
+        XCTAssertEqual(b.chooseArm(for: .large), probe)              // retried at the next slice
+        b.retract(bucket: .small)                                    // nothing to give back there
+        b.retract(bucket: .large)
+        b.retract(bucket: .large)                                    // only once per choice
+        XCTAssertEqual(b.state.buckets["large"]?.probes, 1)
+    }
+
     func testProbeBudgetIsBoundedWhenBatchesNeverCount() {
         var b = make(start: 4)
         var probes = 0
