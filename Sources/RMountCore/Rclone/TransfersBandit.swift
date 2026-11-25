@@ -71,13 +71,11 @@ public struct BanditState: Codable, Equatable {
 
 public struct BanditConfiguration: Equatable {
     public var arms: [Int] = [2, 4, 8, 12, 16]
-    /// Arm used until something was measured; snapped to the nearest arm.
+    /// Arm used until something was measured; snapped to the nearest arm, and never below `minStartingArm`.
     public var startingArm: Int = 4
+    public static let minStartingArm = 4
+    /// Exploration never stops: every batch has this chance of trying an adjacent arm of the best.
     public var epsilon: Double = 0.2
-    /// The best arm "leads clearly" when it beats every neighbour by this fraction...
-    public var clearLead: Double = 0.15
-    /// ...and the best arm and each neighbour have at least this many samples.
-    public var minSamplesToSettle: Int = 3
     public var ewmaAlpha: Double = 0.3
     /// A batch counts when it lasted at least `minBatchDuration` and either moved `minBatchBytes` (a fast arm
     /// finishes a big batch quickly) or ran for `minLongBatchDuration` (a slow one moves fewer bytes).
@@ -92,10 +90,6 @@ public struct BanditConfiguration: Equatable {
     public var maxProbes: Int = 14
     /// A rate-limited batch multiplies the arm's mean by this.
     public var rateLimitFactor: Double = 0.25
-    /// Exploring resumes when the last reward falls this far below the best mean...
-    public var dropFraction: Double = 0.3
-    /// ...or when this long passed without exploring.
-    public var resumeAfter: TimeInterval = 7 * 24 * 3600
     public var smallFileThreshold: Int64 = 8_000_000
 
     public init(arms: [Int] = [2, 4, 8, 12, 16], startingArm: Int = 4) {
@@ -113,13 +107,16 @@ public struct BanditConfiguration: Equatable {
 }
 
 /// Epsilon-greedy bandit choosing rclone's `--transfers` once per upload batch, per remote and workload
-/// bucket. Pure: no I/O, clock and randomness are injected. Not wired into mounts yet.
+/// bucket. Pure: no I/O, clock and randomness are injected; `TransfersController` wires it to a mount.
 ///
-/// Flow: when the queue goes empty -> busy call `chooseArm(for:)`, apply the value (restart rclone or next
-/// mount; see the options discussed in #123), and when the batch finishes call `record(_:arm:)`. With
-/// probability `epsilon` it tries a neighbour of the best arm, otherwise the best. Exploration stops once
-/// the best arm clearly leads its neighbours, and resumes after a long time or when the recent reward drops.
+/// Flow: when the queue goes empty -> busy call `chooseArm(for:)`, apply the value (live via rc `options/set`,
+/// and `--transfers` at the next start), and when the batch finishes call `record(_:arm:)`. A cold start probes
+/// the starting arm and its neighbours first; after that, with a constant probability `epsilon` (1 in 5) it tries
+/// a neighbour of the best arm, otherwise the best. Exploration never stops, so the choice follows the link
+/// when it changes.
 public struct TransfersBandit {
+    /// Batches during which the choice stays within one arm of the starting arm.
+    static let guardedBatches = 3
     public let configuration: BanditConfiguration
     public private(set) var state: BanditState
     private let clock: () -> Date
@@ -147,17 +144,20 @@ public struct TransfersBandit {
         var b = state.buckets[bucket.rawValue] ?? BucketState(lastExplored: clock())
         let best = bestArm(in: b)
         var chosen = best
-        let eps = effectiveEpsilon(b, best: best)
         if let probe = probeTarget(b, best: best) {
             chosen = probe
             b.probes += 1
             b.lastExplored = clock()
-        } else if eps > 0, random() < eps {
+        } else if configuration.epsilon > 0, random() < configuration.epsilon {
             let n = neighbours(of: best)
             if !n.isEmpty {
                 chosen = n[min(Int(random() * Double(n.count)), n.count - 1)]
                 b.lastExplored = clock()
             }
+        }
+        // In the first few batches, never wander more than one arm from the starting arm.
+        if b.batches < Self.guardedBatches, let si = arms.firstIndex(of: startArm()), let ci = arms.firstIndex(of: chosen), abs(ci - si) > 1 {
+            chosen = startArm()
         }
         state.buckets[bucket.rawValue] = b
         return chosen
@@ -175,7 +175,8 @@ public struct TransfersBandit {
     private var arms: [Int] { configuration.arms }
 
     private func startArm() -> Int {
-        arms.min { abs($0 - configuration.startingArm) < abs($1 - configuration.startingArm) } ?? configuration.startingArm
+        let target = max(configuration.startingArm, BanditConfiguration.minStartingArm)
+        return arms.min { abs($0 - target) < abs($1 - target) } ?? target
     }
 
     private func bestArm(in b: BucketState) -> Int {
@@ -204,24 +205,6 @@ public struct TransfersBandit {
             .map { (arm: $0, count: b.stats[String($0)]?.count ?? 0) }
             .filter { $0.count < configuration.probeSamples }
             .min { ($0.count, abs($0.arm - start), $0.arm) < ($1.count, abs($1.arm - start), $1.arm) }?.arm
-    }
-
-    private func leadsClearly(_ b: BucketState, best: Int) -> Bool {
-        guard let top = b.stats[String(best)], top.count >= configuration.minSamplesToSettle else { return false }
-        let n = neighbours(of: best)
-        guard !n.isEmpty else { return false }
-        return n.allSatisfy { arm in
-            guard let s = b.stats[String(arm)], s.count >= configuration.minSamplesToSettle else { return false }
-            return top.mean > s.mean * (1 + configuration.clearLead)
-        }
-    }
-
-    private func effectiveEpsilon(_ b: BucketState, best: Int) -> Double {
-        guard leadsClearly(b, best: best) else { return configuration.epsilon }
-        if clock().timeIntervalSince(b.lastExplored) >= configuration.resumeAfter { return configuration.epsilon }
-        if let last = b.lastReward, let top = b.stats[String(best)],
-           last < top.mean * (1 - configuration.dropFraction) { return configuration.epsilon }
-        return 0
     }
 
     // MARK: Learning

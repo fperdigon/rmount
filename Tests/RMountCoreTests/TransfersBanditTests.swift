@@ -39,6 +39,7 @@ final class TransfersBanditTests: XCTestCase {
 
     func testStartsAtSnappedPriorAndPriors() {
         XCTAssertEqual(make(start: 5).bestArm(for: .large), 4)
+        XCTAssertEqual(make(start: 7).bestArm(for: .large), 8)
         XCTAssertEqual(make(start: 100).bestArm(for: .large), 16)
         XCTAssertEqual(BanditConfiguration.prior(forBackend: "S3"), 8)
         XCTAssertEqual(BanditConfiguration.prior(forBackend: "sftp"), 4)
@@ -64,14 +65,6 @@ final class TransfersBanditTests: XCTestCase {
         XCTAssertEqual(b.bestArm(for: .large), 16)
     }
 
-    func testSettlesAndStopsExploring() {
-        var b = make(start: 4)
-        let curve: (Int) -> Double = { $0 == 4 ? 20 : 5 }
-        run(&b, 200, curve: curve)
-        let late = run(&b, 200, curve: curve)
-        XCTAssertTrue(late.allSatisfy { $0 == 4 })
-    }
-
     func testExploresAboutEpsilonOfTheTime() {
         var b = make(start: 8)
         var other = 0
@@ -91,8 +84,43 @@ final class TransfersBanditTests: XCTestCase {
     }
 
     func testEdgeArmOnlyExploresInward() {
-        var b = make(start: 2)
+        var b = make(start: 4)
+        run(&b, 40) { $0 == 2 ? 50 : 5 }          // arm 2 is by far the best
+        XCTAssertEqual(b.bestArm(for: .large), 2)
         for _ in 0..<300 { XCTAssertTrue([2, 4].contains(b.chooseArm(for: .large))) }
+    }
+
+    func testExplorationNeverStops() {
+        var b = make(start: 4)
+        let curve: (Int) -> Double = { $0 == 4 ? 40 : 5 }     // an overwhelming winner, as clear as it gets
+        run(&b, 300, curve: curve)
+        let late = run(&b, 1000, curve: curve)
+        let other = Double(late.filter { $0 != 4 }.count) / Double(late.count)
+        XCTAssertEqual(other, 0.2, accuracy: 0.04)
+    }
+
+    func testStartNeverBelowFourAndFirstBatchesStayNearThePrior() {
+        XCTAssertEqual(make(start: 2).bestArm(for: .large), 4)
+        XCTAssertEqual(make(start: 1).bestArm(for: .large), 4)
+        XCTAssertEqual(make(start: 3).bestArm(for: .large), 4)
+        for seed in 0..<40 as Range<UInt64> {
+            var b = make(seed: seed, start: 8)
+            let first = run(&b, 3) { _ in 20 }
+            XCTAssertEqual(first.first, 8)
+            XCTAssertTrue(first.allSatisfy { [4, 8, 12].contains($0) }, "\(first)")
+        }
+        for seed in 0..<40 as Range<UInt64> {
+            var b = make(seed: seed, start: 4)
+            XCTAssertTrue(run(&b, 3) { _ in 20 }.allSatisfy { [2, 4, 8].contains($0) })
+        }
+    }
+
+    func testFollowsTheLinkWhenTheBestArmChanges() {
+        var b = make(start: 4)
+        run(&b, 150) { $0 == 4 ? 40 : 5 }
+        XCTAssertEqual(b.bestArm(for: .large), 4)
+        run(&b, 300) { $0 == 8 ? 40 : 5 }                      // the link changed: 8 is the best now
+        XCTAssertEqual(b.bestArm(for: .large), 8)
     }
 
     func testSmallOrShortBatchesIgnored() {
@@ -160,7 +188,7 @@ final class TransfersBanditTests: XCTestCase {
         XCTAssertEqual(b.bestArm(for: .large), 8)
         let after = arms.dropFirst(10)
         let share = Double(after.filter { $0 == 8 }.count) / Double(after.count)
-        XCTAssertGreaterThanOrEqual(share, 0.8, "\(arms)")
+        XCTAssertGreaterThanOrEqual(share, 0.7, "\(arms)")
     }
 
     func testProbesFurtherWhenTheBestArmIsAtTheEdgeAndStopsAtTheCap() {
@@ -201,26 +229,6 @@ final class TransfersBanditTests: XCTestCase {
         XCTAssertEqual(b.bestArm(for: .large), 12)
         XCTAssertEqual(b.bestArm(for: .small), 2)
         XCTAssertNil(b.stats(for: .small, arm: 12))
-    }
-
-    func testExplorationResumesAfterRewardDrop() {
-        var b = make(start: 4)
-        let curve: (Int) -> Double = { $0 == 4 ? 20 : 5 }
-        run(&b, 200, curve: curve)
-        XCTAssertTrue((0..<300).allSatisfy { _ in b.chooseArm(for: .large) == 4 })
-        b.record(batch(mbps: 4), arm: 4)   // last reward collapses well below the mean
-        let drop = (0..<300).filter { _ in b.chooseArm(for: .large) != 4 }.count
-        XCTAssertGreaterThan(drop, 20)
-    }
-
-    func testExplorationResumesAfterLongTime() {
-        var b = make(start: 4)
-        let curve: (Int) -> Double = { $0 == 4 ? 20 : 5 }
-        run(&b, 200, curve: curve)
-        XCTAssertTrue((0..<300).allSatisfy { _ in b.chooseArm(for: .large) == 4 })
-        now = now.addingTimeInterval(8 * 24 * 3600)
-        let n = (0..<300).filter { _ in b.chooseArm(for: .large) != 4 }.count
-        XCTAssertGreaterThanOrEqual(n, 1, "one probe after a quiet week, then quiet again")
     }
 
     func testDeterministic() {
