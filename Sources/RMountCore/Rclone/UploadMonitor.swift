@@ -75,12 +75,15 @@ public struct UploadStatus: Equatable {
 public protocol RcloneControlClient {
     func vfsQueue() async throws -> VFSQueue
     func coreStats() async throws -> RcloneStats
+    /// rc `core/transferred`: completed transfers with rclone's own timestamps (about the last 100).
+    func coreTransferred() async throws -> [CompletedTransfer]
     /// Sets rclone's `--transfers` on the running process (`options/set`); lost when rclone restarts.
     func setTransfers(_ count: Int) async throws
 }
 
 public extension RcloneControlClient {
     func coreStats() async throws -> RcloneStats { throw URLError(.unsupportedURL) }
+    func coreTransferred() async throws -> [CompletedTransfer] { throw URLError(.unsupportedURL) }
     func setTransfers(_ count: Int) async throws { throw URLError(.unsupportedURL) }
 }
 
@@ -106,6 +109,16 @@ public struct URLSessionRcloneControlClient: RcloneControlClient {
         var statsRequest = request
         statsRequest.url = request.url?.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("core/stats")
         return try await perform(statsRequest, as: RcloneStats.self)
+    }
+
+    public func coreTransferred() async throws -> [CompletedTransfer] {
+        var r = request
+        r.url = request.url?.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("core/transferred")
+        let (data, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        return CompletedTransfer.parse(data)
     }
 
     public func setTransfers(_ count: Int) async throws {
@@ -142,14 +155,16 @@ final class UploadMonitor {
     private var inFlight: Task<UploadStatus, Never>?
     private let client: RcloneControlClient
     private let onStatus: (UploadStatus) -> Void
-    /// Called after each successful queue poll with the raw queue and (if it worked) the stats.
-    private let onSample: ((VFSQueue, RcloneStats?) async -> Void)?
+    /// Called after each successful queue poll with the raw queue, the stats (if they worked) and rclone's
+    /// completed-transfer records (nil when not fetched or unsupported).
+    private let onSample: ((VFSQueue, RcloneStats?, [CompletedTransfer]?) async -> Void)?
+    private var lastBytes: Int64?
     private var lastQueue = VFSQueue()
     private var failedPolls = 0
     private var stopped = false
 
     init(client: RcloneControlClient, intervals: Intervals = Intervals(),
-         onSample: ((VFSQueue, RcloneStats?) async -> Void)? = nil,
+         onSample: ((VFSQueue, RcloneStats?, [CompletedTransfer]?) async -> Void)? = nil,
          onStatus: @escaping (UploadStatus) -> Void) {
         self.client = client
         self.onStatus = onStatus
@@ -173,12 +188,20 @@ final class UploadMonitor {
             var stats: RcloneStats?
             do { self.lastQueue = try await self.client.vfsQueue(); queueSucceeded = true } catch {}
             do { stats = try await self.client.coreStats() } catch {}
+            // Transfer records are read when the queue is busy or the byte counter moved since the last poll,
+            // so an idle poll stays two cheap calls.
+            var transferred: [CompletedTransfer]?
+            if queueSucceeded, self.onSample != nil,
+               !self.lastQueue.queue.isEmpty || stats?.bytes != self.lastBytes || self.lastBytes == nil {
+                transferred = try? await self.client.coreTransferred()
+            }
+            if let bytes = stats?.bytes { self.lastBytes = bytes }
             self.failedPolls = queueSucceeded && stats != nil ? 0 : self.failedPolls + 1
             // Accounting from a different queue sample must never imply upload completion.
             let status = self.lastQueue.status(stats: queueSucceeded ? stats : nil, isStale: self.failedPolls >= 2)
             self.inFlight = nil
             if !self.stopped && !Task.isCancelled { self.onStatus(status) }
-            if queueSucceeded, !self.stopped, !Task.isCancelled { await self.onSample?(self.lastQueue, stats) }
+            if queueSucceeded, !self.stopped, !Task.isCancelled { await self.onSample?(self.lastQueue, stats, transferred) }
             return status
         }
         inFlight = sample

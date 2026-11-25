@@ -26,16 +26,25 @@ public extension Remote {
     }
 }
 
-/// Drives rclone's `--transfers` for one mounted remote: watches its upload queue, picks the value for the
-/// next batch with the bandit while idle (at startup and right after a batch drains; applied live with
-/// `options/set`), so it is already in force when the first byte is written, and learns from the batch when it
-/// ends. A batch is credited to the arm that was in force when it started; if the arm changed meanwhile the
-/// sample is discarded.
+/// Drives rclone's `--transfers` for one mounted remote. The value for the next batch is chosen with the bandit
+/// while idle (first sample after mount, and right after a batch ends) and applied live with `options/set`, so it
+/// is in force when the first byte is written.
+///
+/// Learning uses rclone's own transfer records (`core/transferred`, with start and completion times), not the
+/// timing of our polls: transfers that follow each other form a batch whose span is first start to last
+/// completion, however late it is noticed (a whole batch can happen between two idle polls). The batch is
+/// credited to the arm that was in force over its whole span; one that straddles an arm change is dropped. When
+/// the records are missing or empty, it falls back to timing batches from the queue and stats polls.
 @MainActor
 public final class TransfersController {
+    /// When an arm became active: `before` is when we asked rclone, `after` when it answered.
+    struct ArmChange: Equatable { var before: Date; var after: Date; var arm: Int }
+
     public internal(set) var currentArm: Int
     public private(set) var bandit: TransfersBandit
     private var tracker = TransfersBatchTracker()
+    private var builder = TransfersBatchBuilder()
+    private(set) var armLog: [ArmChange]
     private let remoteID: UUID
     private let store: TransfersBanditStore
     private let client: RcloneControlClient
@@ -46,8 +55,12 @@ public final class TransfersController {
     private var busy = false
     /// Nothing has been chosen for the next batch yet.
     private var needsPrepare = true
-    /// The arm in force when the running batch started.
+    /// Fallback mode only: the arm in force when the running batch started.
     private var armAtStart: Int?
+    /// Rate-limit / failure / stall verdicts from the queue tracker, applied to the next batch built from records.
+    private var pendingRateLimited = false
+    private var pendingFailed = false
+    private var pendingIgnore = false
 
     /// The arm to start rclone with (`--transfers`): the best known one, or the backend's prior.
     public static func startupArm(for remote: Remote, store: TransfersBanditStore) -> Int {
@@ -71,6 +84,7 @@ public final class TransfersController {
         self.log = log
         self.onChange = onChange
         self.currentArm = startingArm
+        self.armLog = [ArmChange(before: .distantPast, after: .distantPast, arm: startingArm)]
         let state = store.load(remote: remote.id.uuidString) ?? BanditState()
         self.bandit = TransfersBandit(configuration: .forBackend(remote.transfersBackendID), state: state,
                                       clock: clock, random: random)
@@ -81,37 +95,77 @@ public final class TransfersController {
         Logger(subsystem: "ai.rmount", category: "transfers").debug("\(message, privacy: .public)")
     }
 
-    /// Feed one queue/stats sample. Samples that arrive while an arm change is in flight are dropped.
-    public func observe(queue: VFSQueue, stats: RcloneStats?) async {
+    /// Feed one sample: the queue, core stats and (when available) rclone's completed-transfer records.
+    /// Samples that arrive while an arm change is in flight are dropped.
+    public func observe(queue: VFSQueue, stats: RcloneStats?, transferred: [CompletedTransfer]? = nil) async {
         guard !busy else { return }
+        let entries = queue.queue.filter { !TransferProgress.isSidecar($0.name ?? "") }
         let event = tracker.observe(queue: queue, stats: stats, now: clock())
         switch event {
-        case nil:
-            let idle = !tracker.isActive && !queue.queue.contains { !TransferProgress.isSidecar($0.name ?? "") }
-            if needsPrepare, idle { await prepareNext() }
-        case .started(let files, let bytes)?:
-            let actual = WorkloadBucket.bucket(bytes: bytes, fileCount: files,
-                                               smallFileThreshold: bandit.configuration.smallFileThreshold)
-            // The arm was chosen while idle, for the previous workload; the batch keeps it and is credited to it
-            // under the bucket it really is (an arm is never changed mid-batch).
-            bucket = actual
+        case .started?:
+            pendingRateLimited = false; pendingFailed = false; pendingIgnore = false
             armAtStart = currentArm
             needsPrepare = false
         case .finished(let batch)?:
-            let startArm = armAtStart
-            armAtStart = nil
-            if let batch, let startArm, startArm == currentArm {
-                bandit.record(batch, arm: startArm, bucket: bucket)
-                do { try store.save(bandit.state, remote: remoteID.uuidString) }
-                catch { log("transfers \(remoteID.uuidString) could not save state") }
-            } else if batch != nil {
-                log("transfers \(remoteID.uuidString) batch discarded (arm changed during it)")
-            } else {
-                log("transfers \(remoteID.uuidString) batch ignored (stalled or no counter)")
-            }
-            needsPrepare = true
-            if queue.queue.allSatisfy({ TransferProgress.isSidecar($0.name ?? "") }) { await prepareNext() }
+            if let batch { pendingRateLimited = batch.rateLimited; pendingFailed = batch.failed } else { pendingIgnore = true }
+        case nil:
+            break
         }
+        if let transferred { builder.add(transferred) }
+        if builder.hasPending {
+            for built in builder.finish(now: clock(), queueEmpty: entries.isEmpty,
+                                        uploading: entries.contains { $0.uploading == true }) {
+                learn(built)
+            }
+        }
+        if case .finished(let batch)? = event {
+            needsPrepare = true
+            if !builder.hasProduced { learnFromPolling(batch) }   // no usable records: time it from the polls
+            armAtStart = nil
+        }
+        if needsPrepare, entries.isEmpty, !tracker.isActive { await prepareNext() }
+    }
+
+    private func learn(_ built: RecordedBatch) {
+        needsPrepare = true
+        var batch = built.batch
+        batch.rateLimited = batch.rateLimited || pendingRateLimited
+        batch.failed = batch.failed || pendingFailed
+        let ignore = pendingIgnore
+        pendingRateLimited = false; pendingFailed = false; pendingIgnore = false
+        guard !ignore else { log("transfers \(remoteID.uuidString) batch ignored (stalled or no counter)"); return }
+        guard let arm = armInForce(from: built.start, to: built.end) else {
+            log("transfers \(remoteID.uuidString) batch discarded (arm changed during it)")
+            return
+        }
+        bucket = WorkloadBucket.bucket(bytes: batch.bytes, fileCount: batch.fileCount,
+                                       smallFileThreshold: bandit.configuration.smallFileThreshold)
+        bandit.record(batch, arm: arm, bucket: bucket)
+        save()
+    }
+
+    private func learnFromPolling(_ batch: UploadBatch?) {
+        guard let batch else { log("transfers \(remoteID.uuidString) batch ignored (stalled or no counter)"); return }
+        guard let startArm = armAtStart, startArm == currentArm else {
+            log("transfers \(remoteID.uuidString) batch discarded (arm changed during it)")
+            return
+        }
+        bucket = WorkloadBucket.bucket(bytes: batch.bytes, fileCount: batch.fileCount,
+                                       smallFileThreshold: bandit.configuration.smallFileThreshold)
+        bandit.record(batch, arm: startArm, bucket: bucket)
+        save()
+    }
+
+    private func save() {
+        do { try store.save(bandit.state, remote: remoteID.uuidString) }
+        catch { log("transfers \(remoteID.uuidString) could not save state") }
+    }
+
+    /// The arm in force during the whole of `start...end`, or nil when it changed within that span.
+    func armInForce(from start: Date, to end: Date) -> Int? {
+        guard let i = armLog.lastIndex(where: { $0.after <= start }) else { return nil }
+        if armLog.dropFirst(i + 1).contains(where: { $0.before <= end }) { return nil }
+        return armLog[i].arm
     }
 
     /// Chooses the arm for the next batch and puts it in force now, while nothing is uploading.
@@ -121,10 +175,13 @@ public final class TransfersController {
         guard arm != currentArm else { return }
         busy = true
         defer { busy = false }
+        let before = clock()
         do {
             try await client.setTransfers(arm)
             log("transfers \(remoteID.uuidString) bucket=\(bucket.rawValue) \(currentArm) -> \(arm)")
             currentArm = arm
+            armLog.append(ArmChange(before: before, after: clock(), arm: arm))
+            if armLog.count > 32 { armLog.removeFirst(armLog.count - 32) }
             onChange(arm)
         } catch {
             log("transfers \(remoteID.uuidString) could not set \(arm), keeping \(currentArm)")
