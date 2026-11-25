@@ -97,14 +97,84 @@ final class TransfersBanditTests: XCTestCase {
 
     func testSmallOrShortBatchesIgnored() {
         var b = make()
-        b.record(UploadBatch(bytes: 10_000_000, duration: 60, fileCount: 1), arm: 4)
-        b.record(UploadBatch(bytes: 500_000_000, duration: 5, fileCount: 1), arm: 4)
+        b.record(UploadBatch(bytes: 3_000_000, duration: 60, fileCount: 1), arm: 4)
+        b.record(UploadBatch(bytes: 500_000_000, duration: 3, fileCount: 1), arm: 4)      // too short
+        b.record(UploadBatch(bytes: 60_000_000, duration: 15, fileCount: 1), arm: 4)      // few bytes, not long
+        b.record(UploadBatch(bytes: 1_000_000, duration: 60, fileCount: 1), arm: 4)       // long but latency only
         b.record(UploadBatch(bytes: 500_000_000, duration: 60, fileCount: 1, failed: true), arm: 4)
         b.record(batch(mbps: 10), arm: 99)
         XCTAssertNil(b.stats(for: .large, arm: 4))
         b.record(batch(mbps: 10), arm: 4)
         XCTAssertEqual(b.stats(for: .large, arm: 4)?.count, 1)
         XCTAssertEqual(b.stats(for: .large, arm: 4)!.mean, 10, accuracy: 0.001)
+    }
+
+    func testFastBatchesCountByBytesAndSlowOnesByDuration() {
+        var b = make()
+        b.record(UploadBatch(bytes: 600_000_000, duration: 6, fileCount: 3), arm: 8)      // fast arm, short batch
+        XCTAssertEqual(b.stats(for: .large, arm: 8)?.count, 1)
+        XCTAssertEqual(b.stats(for: .large, arm: 8)!.mean, 100, accuracy: 0.001)
+        b.record(UploadBatch(bytes: 40_000_000, duration: 25, fileCount: 3), arm: 2)      // slow arm, long batch
+        XCTAssertEqual(b.stats(for: .large, arm: 2)?.count, 1)
+        b.record(UploadBatch(bytes: 600_000_000, duration: 4.9, fileCount: 3), arm: 12)   // under the minimum duration
+        XCTAssertNil(b.stats(for: .large, arm: 12))
+    }
+
+    func testColdStartProbesNeighboursSystematically() {
+        var b = make(start: 4)
+        var seen: [Int] = []
+        for _ in 0..<3 {
+            now = now.addingTimeInterval(120)
+            let arm = b.chooseArm(for: .large)
+            seen.append(arm)
+            b.record(batch(mbps: 10 * Double(arm), seconds: 30), arm: arm)
+        }
+        // Prior first, then the closer neighbour, then the other one; best (8) is then probed outward.
+        XCTAssertEqual(seen, [4, 2, 8])
+        now = now.addingTimeInterval(120)
+        XCTAssertEqual(b.chooseArm(for: .large), 12)
+    }
+
+    func testProbeBudgetIsBoundedWhenBatchesNeverCount() {
+        var b = make(start: 4)
+        var probes = 0
+        for _ in 0..<200 where b.chooseArm(for: .large) != 4 { probes += 1 }
+        // Nothing is ever recorded: after the budget, only epsilon-greedy exploration remains.
+        XCTAssertEqual(Double(probes) / 200, 0.1, accuracy: 0.07)
+        XCTAssertEqual(b.state.buckets["large"]?.probes, b.configuration.maxProbes)
+    }
+
+    func testReachesTheBestArmFastFromTheVMScenarioAndStaysThere() {
+        // The curve seen in the VM: 2 -> 10, 4 -> 20, 8 -> 40 MB/s over 600 MB batches (S3-like prior of 4).
+        let curve: [Int: Double] = [2: 10, 4: 20, 8: 40, 12: 32, 16: 25]
+        var b = make(seed: 11, start: 4)
+        var arms: [Int] = []
+        for _ in 0..<60 {
+            now = now.addingTimeInterval(120)
+            let arm = b.chooseArm(for: .large)
+            arms.append(arm)
+            let mbps = curve[arm]!
+            b.record(UploadBatch(bytes: 600_000_000, duration: 600 / mbps, fileCount: 6), arm: arm)
+        }
+        XCTAssertTrue(arms.prefix(10).contains(8), "\(arms)")
+        XCTAssertEqual(b.bestArm(for: .large), 8)
+        let after = arms.dropFirst(10)
+        let share = Double(after.filter { $0 == 8 }.count) / Double(after.count)
+        XCTAssertGreaterThanOrEqual(share, 0.8, "\(arms)")
+    }
+
+    func testProbesFurtherWhenTheBestArmIsAtTheEdgeAndStopsAtTheCap() {
+        var b = make(start: 12)
+        var seen: [Int] = []
+        for _ in 0..<10 {
+            now = now.addingTimeInterval(120)
+            let arm = b.chooseArm(for: .large)
+            seen.append(arm)
+            b.record(batch(mbps: 5 * Double(arm), seconds: 30), arm: arm)   // keeps improving up to 16
+        }
+        XCTAssertTrue(seen.contains(16))
+        XCTAssertEqual(b.bestArm(for: .large), 16)
+        XCTAssertTrue(seen.allSatisfy { [2, 4, 8, 12, 16].contains($0) })
     }
 
     func testEwmaMean() {

@@ -38,16 +38,19 @@ public struct BucketState: Codable, Equatable {
     public var lastReward: Double?
     public var lastExplored: Date
     public var batches: Int = 0
+    /// Systematic probes handed out so far (bounded, so an arm whose batches are never valid cannot be probed forever).
+    public var probes: Int = 0
 
     public init(lastExplored: Date) { self.lastExplored = lastExplored }
 
-    private enum CodingKeys: String, CodingKey { case stats, lastReward, lastExplored, batches }
+    private enum CodingKeys: String, CodingKey { case stats, lastReward, lastExplored, batches, probes }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         stats = (try? c.decodeIfPresent([String: ArmStats].self, forKey: .stats)) ?? [:]
         lastReward = try? c.decodeIfPresent(Double.self, forKey: .lastReward)
         lastExplored = (try? c.decodeIfPresent(Date.self, forKey: .lastExplored)) ?? Date()
         batches = (try? c.decodeIfPresent(Int.self, forKey: .batches)) ?? 0
+        probes = (try? c.decodeIfPresent(Int.self, forKey: .probes)) ?? 0
     }
 }
 
@@ -76,9 +79,17 @@ public struct BanditConfiguration: Equatable {
     /// ...and the best arm and each neighbour have at least this many samples.
     public var minSamplesToSettle: Int = 3
     public var ewmaAlpha: Double = 0.3
-    /// Batches smaller or shorter than this are too noisy to learn from.
-    public var minBatchBytes: Int64 = 50_000_000
-    public var minBatchDuration: TimeInterval = 15
+    /// A batch counts when it lasted at least `minBatchDuration` and either moved `minBatchBytes` (a fast arm
+    /// finishes a big batch quickly) or ran for `minLongBatchDuration` (a slow one moves fewer bytes).
+    public var minBatchBytes: Int64 = 100_000_000
+    public var minBatchDuration: TimeInterval = 5
+    public var minLongBatchDuration: TimeInterval = 20
+    /// Even a long batch must have moved this much, or it measured latency, not throughput.
+    public var minLongBatchBytes: Int64 = 5_000_000
+    /// Until the best arm and each neighbour have this many samples, probe instead of exploiting.
+    public var probeSamples: Int = 2
+    /// Upper bound on systematic probes per bucket.
+    public var maxProbes: Int = 14
     /// A rate-limited batch multiplies the arm's mean by this.
     public var rateLimitFactor: Double = 0.25
     /// Exploring resumes when the last reward falls this far below the best mean...
@@ -137,7 +148,11 @@ public struct TransfersBandit {
         let best = bestArm(in: b)
         var chosen = best
         let eps = effectiveEpsilon(b, best: best)
-        if eps > 0, random() < eps {
+        if let probe = probeTarget(b, best: best) {
+            chosen = probe
+            b.probes += 1
+            b.lastExplored = clock()
+        } else if eps > 0, random() < eps {
             let n = neighbours(of: best)
             if !n.isEmpty {
                 chosen = n[min(Int(random() * Double(n.count)), n.count - 1)]
@@ -177,6 +192,20 @@ public struct TransfersBandit {
         return [i - 1, i + 1].filter { arms.indices.contains($0) }.map { arms[$0] }
     }
 
+    /// Systematic cold-start exploration: measure the best arm, then the least-sampled arm next to it
+    /// (closest to the backend prior first) until each has `probeSamples`. When the best arm sits at the edge of
+    /// what was measured, its unmeasured outer neighbour has no samples yet, so it is probed next: the search
+    /// walks outward while it keeps improving and stops at the arm cap.
+    private func probeTarget(_ b: BucketState, best: Int) -> Int? {
+        guard b.probes < configuration.maxProbes else { return nil }
+        if (b.stats[String(best)]?.count ?? 0) == 0 { return best }
+        let start = startArm()
+        return neighbours(of: best)
+            .map { (arm: $0, count: b.stats[String($0)]?.count ?? 0) }
+            .filter { $0.count < configuration.probeSamples }
+            .min { ($0.count, abs($0.arm - start), $0.arm) < ($1.count, abs($1.arm - start), $1.arm) }?.arm
+    }
+
     private func leadsClearly(_ b: BucketState, best: Int) -> Bool {
         guard let top = b.stats[String(best)], top.count >= configuration.minSamplesToSettle else { return false }
         let n = neighbours(of: best)
@@ -197,8 +226,8 @@ public struct TransfersBandit {
 
     // MARK: Learning
 
-    /// Records a finished batch that ran with `arm`. Batches that are too small or short, or failed for other
-    /// reasons, are ignored; a rate-limited batch penalises the arm whatever its size.
+    /// Records a finished batch that ran with `arm`. Batches that are too small or short (see `minBatchBytes`), or failed
+    /// for other reasons, are ignored; a rate-limited batch penalises the arm whatever its size.
     /// Pass the `bucket` the arm was chosen for; by default it is derived from the batch's average file size.
     public mutating func record(_ batch: UploadBatch, arm: Int, bucket: WorkloadBucket? = nil) {
         guard arms.contains(arm) else { return }
@@ -211,8 +240,10 @@ public struct TransfersBandit {
             s.mean *= configuration.rateLimitFactor
             last = s.mean
         } else {
-            guard !batch.failed, batch.bytes >= configuration.minBatchBytes,
-                  batch.duration >= configuration.minBatchDuration else { return }
+            guard !batch.failed, batch.duration >= configuration.minBatchDuration else { return }
+            let enough = batch.bytes >= configuration.minBatchBytes
+                || (batch.duration >= configuration.minLongBatchDuration && batch.bytes >= configuration.minLongBatchBytes)
+            guard enough else { return }
             let reward = Double(batch.bytes) / 1_000_000 / batch.duration
             s.mean = s.count == 0 ? reward : s.mean + configuration.ewmaAlpha * (reward - s.mean)
             last = reward
