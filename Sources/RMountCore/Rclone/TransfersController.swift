@@ -174,6 +174,7 @@ public final class TransfersController {
             log("transfers \(remoteID.uuidString) slice ignored: \(meter.dropReason)")
             return
         }
+        if reading.rateLimited { log("transfers \(remoteID.uuidString) slice rate limited: \(tracker.lastSignal)") }
         let slice = UploadBatch(bytes: reading.bytes, duration: reading.duration, fileCount: sliceFiles,
                                 rateLimited: reading.rateLimited, failed: reading.failed)
         if let why = bandit.rejectionReason(for: slice, arm: currentArm) {

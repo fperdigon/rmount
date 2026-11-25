@@ -87,36 +87,40 @@ final class TransfersBatchTrackerTests: XCTestCase {
         XCTAssertEqual(b.fileCount, 2)
     }
 
-    func testRisingTriesMarkRateLimited() {
+    func testTheSameUploadAtThreeTriesOrMoreAcrossPollsMarksRateLimited() {
         var t = TransfersBatchTracker()
-        _ = t.observe(queue: VFSQueue(queue: [entry(1)]), stats: stats(0), now: at(0))
-        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 1)]), stats: stats(1_000_000), now: at(5))
-        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 2)]), stats: stats(2_000_000), now: at(10))
-        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 3)]), stats: stats(3_000_000), now: at(15))
-        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(100_000_000), now: at(20)) else { return XCTFail() }
-        XCTAssertTrue(b.rateLimited)
-        XCTAssertFalse(b.failed)
+        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 2)]), stats: stats(0), now: at(0))
+        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 3)]), stats: stats(1_000_000), now: at(5))
+        XCTAssertFalse(t.takeFlags().rateLimited)                                                     // first time at 3
+        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 3)]), stats: stats(2_000_000), now: at(10))
+        XCTAssertTrue(t.takeFlags().rateLimited)                                                      // still retrying the same upload
+        XCTAssertFalse(t.lastSignal.isEmpty)
     }
 
-    func testASingleRetryOrAStaleHighTryCountIsNotARateLimit() {
+    func testOneTryPerUploadAndFluctuatingDelayAreNotARateLimit() {
+        // The failing VM run: tries stayed at 1, errors at 0, and the queue's delay field kept changing.
         var t = TransfersBatchTracker()
-        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 4)]), stats: stats(0), now: at(0))      // already retried before we looked
-        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 4)]), stats: stats(1_000_000), now: at(5))
-        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 5)]), stats: stats(2_000_000), now: at(10))   // one retry
-        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(100_000_000), now: at(20)) else { return XCTFail() }
+        func q(_ delay: Double) -> VFSQueue {
+            VFSQueue(queue: (1...12).map { VFSQueue.Entry(name: "f\($0)", id: UInt64($0), size: 100_000_000, uploading: $0 <= 6, tries: 1, delay: delay) })
+        }
+        _ = t.observe(queue: q(5), stats: stats(0, errors: 0), now: at(0))
+        for (i, d) in [4.0, 9.0, 2.0, 30.0, 1.0, 14.0, 60.0, 3.0].enumerated() {
+            _ = t.observe(queue: q(d), stats: stats(Int64(i + 1) * 10_000_000, errors: 0), now: at(Double(i + 1) * 1.5))
+            let f = t.takeFlags()
+            XCTAssertFalse(f.rateLimited)
+            XCTAssertFalse(f.failed)
+        }
+        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(500_000_000, errors: 0), now: at(40)) else { return XCTFail() }
         XCTAssertFalse(b.rateLimited)
     }
 
-    func testRisingBackoffDelayCountsButTheWriteBackWaitDoesNot() {
-        func entryWithDelay(_ d: Double) -> VFSQueue { VFSQueue(queue: [VFSQueue.Entry(name: "f", id: 1, size: 100_000_000, uploading: false, tries: 0, delay: d)]) }
+    func testASingleRetryIsNotARateLimit() {
         var t = TransfersBatchTracker()
-        _ = t.observe(queue: entryWithDelay(5), stats: stats(0), now: at(0))
-        _ = t.observe(queue: entryWithDelay(5), stats: stats(0), now: at(2))                      // waiting out write-back
-        XCTAssertFalse(t.takeFlags().rateLimited)
-        _ = t.observe(queue: entryWithDelay(10), stats: stats(0), now: at(4))
-        _ = t.observe(queue: entryWithDelay(20), stats: stats(0), now: at(6))                     // backing off, twice
-        XCTAssertTrue(t.takeFlags().rateLimited)
-        XCTAssertFalse(t.takeFlags().rateLimited)                                                 // cleared for the next slice
+        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 1)]), stats: stats(0), now: at(0))
+        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 1)]), stats: stats(1_000_000), now: at(5))
+        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 2)]), stats: stats(2_000_000), now: at(10))   // one retry
+        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(100_000_000), now: at(20)) else { return XCTFail() }
+        XCTAssertFalse(b.rateLimited)
     }
 
     func testAStickyLastErrorWithoutNewErrorsIsIgnored() {
@@ -851,13 +855,22 @@ final class TransfersSliceMeterTests: XCTestCase {
         XCTAssertNil(m.finish())
     }
 
-    func testRateLimitAlwaysYieldsAPenaltyReading() {
+    func testRateLimitedSliceNeedsItsDataAndNeverYieldsAnEmptyPenalty() {
         var m = TransfersSliceMeter()
         m.begin(at: at(0), warmup: 0)
         m.sample(time: at(0), bytes: 0, contaminated: false, rateLimited: true, failed: false)
-        XCTAssertEqual(m.finish()?.rateLimited, true)
+        XCTAssertNil(m.finish())                                           // nothing measured: no penalty either
+        XCTAssertEqual(m.dropReason, "no data")
         m.begin(at: at(0), warmup: 0)
-        XCTAssertEqual(m.finish(extraRateLimited: true)?.rateLimited, true)
+        XCTAssertNil(m.finish(extraRateLimited: true))
+        XCTAssertEqual(m.dropReason, "no data")
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0)])
+        m.sample(time: at(20), bytes: 400_000_000, contaminated: false, rateLimited: true, failed: false)
+        let r = try! XCTUnwrap(m.finish())
+        XCTAssertTrue(r.rateLimited)                                       // with data: a penalty that carries its numbers
+        XCTAssertEqual(r.bytes, 400_000_000)
+        XCTAssertEqual(r.duration, 20, accuracy: 0.001)
         m.begin(at: at(0), warmup: 0)
         feed(&m, [(0, 0), (20, 400_000_000)])
         XCTAssertEqual(m.finish(extraFailed: true)?.failed, true)
@@ -985,6 +998,37 @@ final class TransfersSliceControllerTests: XCTestCase {
         }
     }
 
+    /// The failing VM run: 12-24 uploads in flight with tries = 1, no errors and a `delay` that keeps changing, and
+    /// about every other slice measured nothing. None of it may penalise an arm; the exploited arm stays at the floor.
+    func testNoPenaltyFromFluctuatingDelayOneTryAndEmptySlices() async throws {
+        let client = TransfersClient()
+        let c = make(client: client, seed: 17)
+        var counter = 0.0
+        var t = 0.0
+        func queue(_ i: Int) -> VFSQueue {
+            VFSQueue(queue: (1...12).map { VFSQueue.Entry(name: "f\($0)", id: UInt64($0), size: 100_000_000, uploading: true, tries: 1,
+                                                      delay: Double((i * 7 + $0 * 3) % 30)) })
+        }
+        await c.observe(queue: queue(0), stats: RcloneStats(bytes: 0, errors: 0), sampledAt: t0)
+        var tick = 0
+        while t < 17 * 60 {
+            t += 1.5; tick += 1
+            let slice = Int(t / 60)
+            if slice % 2 == 1 { counter += 25e6 * 1.5 }               // every other slice moves nothing (counter flat)
+            now = t0.addingTimeInterval(t)
+            await c.observe(queue: queue(tick), stats: RcloneStats(bytes: Int64(counter), errors: 0), sampledAt: now)
+        }
+        XCTAssertFalse(logs.contains { $0.contains("rate limited") }, "\(logs.filter { $0.contains("rate") })")
+        for arm in BanditConfiguration.defaultArms {
+            guard let s = c.bandit.stats(for: .large, arm: arm) else { continue }
+            XCTAssertGreaterThan(s.mean, 0, "arm \(arm)")
+            XCTAssertEqual(s.real, s.count, "arm \(arm) was penalised")
+        }
+        XCTAssertGreaterThanOrEqual(c.bandit.bestArm(for: .large), 4)
+        XCTAssertGreaterThanOrEqual(c.currentArm, 1)
+        XCTAssertTrue(logs.contains { $0.contains("slice ignored") })
+    }
+
     func testFirstSlicesStayNearThePriorAndADriveRemoteNeverExceedsEight() async throws {
         let client = TransfersClient()
         let c = make(client: client, seed: 3)
@@ -1032,7 +1076,7 @@ final class TransfersSliceControllerTests: XCTestCase {
         await c.observe(queue: q1, stats: RcloneStats(bytes: 800_000_000, errors: 1, lastError: "429 too many requests"))
         let s = try XCTUnwrap(c.bandit.stats(for: .large, arm: 4))
         XCTAssertEqual(s.count, 1)
-        XCTAssertEqual(s.mean, 0, accuracy: 0.001)                       // mean 0 x 0.25: an unmeasured arm penalised
+        XCTAssertEqual(s.mean, 800.0 / 61 * 0.25, accuracy: 0.5)          // the slice's own 13 MB/s, penalised to a quarter
     }
 
     func testABatchSeenOnlyAtItsTailIsDroppedAsASliceButCreditedFromTheRecords() async throws {

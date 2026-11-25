@@ -82,8 +82,8 @@ public struct TransfersSliceMeter {
         last = (time, bytes)
     }
 
-    /// Ends the slice. Nil when it cannot be used (too little measured, stalled, contaminated, no counter);
-    /// a rate-limited slice always yields a reading so the arm can be penalised.
+    /// Ends the slice. Nil when it cannot be used (nothing measured, stalled, contaminated, no counter), whatever the
+    /// rate-limit flags say: a penalty needs the data of the slice it applies to.
     public mutating func finish(extraRateLimited: Bool = false, extraFailed: Bool = false, stalledOverride: Bool = false,
                                 endAtLastProgress: Bool = false) -> Reading? {
         defer { start = nil; windowStart = nil; baseline = nil; last = nil; lastProgress = nil }
@@ -91,14 +91,13 @@ public struct TransfersSliceMeter {
         guard start != nil else { dropReason = "no slice running"; return nil }
         let limited = rateLimited || extraRateLimited
         let bad = failed || extraFailed
-        if limited { return Reading(bytes: 0, duration: 0, rateLimited: true, failed: false) }
         if stalled || stalledOverride { dropReason = "stalled"; return nil }
         if contaminated { dropReason = "a download ran during the slice"; return nil }
-        guard let b = baseline else { dropReason = "no byte counter after the warm-up"; return nil }
+        guard let b = baseline else { dropReason = "no data"; return nil }
         guard let end = endAtLastProgress ? lastProgress : last, end.time > b.time, end.bytes > b.bytes else {
-            dropReason = "no progress measured"; return nil
+            dropReason = "no data"; return nil          // a slice that measured nothing is neither a reward nor a penalty
         }
-        return Reading(bytes: end.bytes - b.bytes, duration: end.time.timeIntervalSince(b.time), rateLimited: false, failed: bad)
+        return Reading(bytes: end.bytes - b.bytes, duration: end.time.timeIntervalSince(b.time), rateLimited: limited, failed: bad && !limited)
     }
 
     /// The counter at the last sample, to carry a slice on into the next one unchanged.

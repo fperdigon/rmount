@@ -31,9 +31,9 @@ public struct TransfersBatchTracker {
         var files: [String: Int64] = [:]
         var baselineErrors: Int?
         /// Times an entry's `tries` or backoff `delay` went up between polls.
-        var retrySignals = 0
+        /// A queue entry showed `tries` of at least 3 on two polls in a row: rclone keeps retrying the same upload.
+        var heavyRetry = false
         var triesSeen: [String: Int] = [:]
-        var delaySeen: [String: Double] = [:]
         var throttled = false
         var failed = false
         var stalled = false
@@ -56,7 +56,10 @@ public struct TransfersBatchTracker {
                        options: .regularExpression) != nil
     }
 
-    private static func retrying(_ a: Active) -> Bool { a.retrySignals >= 2 }
+    /// What last raised a rate-limit signal, for the debug log (no names or secrets).
+    public private(set) var lastSignal = ""
+
+    private static func retrying(_ a: Active) -> Bool { a.heavyRetry }
 
     public mutating func observe(queue: VFSQueue, stats: RcloneStats?, now: Date) -> Event? {
         let entries = queue.queue.filter { !TransferProgress.isSidecar($0.name ?? "") }
@@ -97,7 +100,7 @@ public struct TransfersBatchTracker {
     public mutating func takeFlags() -> (rateLimited: Bool, failed: Bool) {
         guard var a = active else { return (false, false) }
         let flags = (a.throttled || (Self.retrying(a) && !a.failed), a.failed)
-        a.throttled = false; a.retrySignals = 0; a.failed = false
+        a.throttled = false; a.heavyRetry = false; a.failed = false
         active = a
         return flags
     }
@@ -108,11 +111,11 @@ public struct TransfersBatchTracker {
             let key = e.id.map(String.init) ?? e.name ?? "?"
             a.files[key] = max(a.files[key] ?? 0, e.size ?? 0)
             let tries = e.tries ?? 0
-            if let before = a.triesSeen[key], tries > before { a.retrySignals += 1 }
+            if let before = a.triesSeen[key], before >= 3, tries >= 3 {
+                a.heavyRetry = true
+                lastSignal = "tries \(tries) on one upload across polls"
+            }
             a.triesSeen[key] = tries
-            let delay = e.delay ?? 0
-            if let before = a.delaySeen[key], delay > before { a.retrySignals += 1 }
-            a.delaySeen[key] = delay
         }
         if let counter = stats?.bytes {
             if let last = a.lastCounter {
@@ -128,7 +131,7 @@ public struct TransfersBatchTracker {
         }
         if let errors = stats?.errors {
             if let base = a.baselineErrors, errors > base {
-                if let text = stats?.lastError, Self.looksRateLimited(text) { a.throttled = true } else { a.failed = true }
+                if let text = stats?.lastError, Self.looksRateLimited(text) { a.throttled = true; lastSignal = "new error with a throttling message" } else { a.failed = true }
                 a.baselineErrors = errors
             } else if a.baselineErrors == nil {
                 a.baselineErrors = errors
