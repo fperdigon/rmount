@@ -5,7 +5,12 @@ import Foundation
 /// A batch starts when the queue goes empty -> non-empty and ends when it drains. Pure: the caller passes
 /// the clock. The batch's duration runs from the last sample before the byte counter first moved (so the
 /// write-back delay before uploads begin, and a late first look at the queue, do not count against the arm);
-/// a poll every second or so keeps that error small. Bytes are the growth of rclone's cumulative `core/stats` counter (capped by the queued file
+/// while uploads are queued the caller polls every second or so, which keeps that error small. When the batch
+/// is first seen late (the idle poll is slow on purpose) and bytes already moved, the start is estimated from
+/// data: `seen - bytesAlreadyMoved / rate`, with the rate measured after the first sighting, and never earlier
+/// than the last idle sample. Residual bias: a ramp-up that was slower than the later rate makes the estimate
+/// too early (the arm looks slightly slower); a batch that ends before any byte moves after the first sighting
+/// falls back to the last idle sample (up to one idle poll too early). Bytes are the growth of rclone's cumulative `core/stats` counter (capped by the queued file
 /// sizes, so a download that runs meanwhile cannot inflate the reward).
 ///
 /// Rate limits: rclone's pacer retries 429s silently, so a rising `tries` count in the queue or a rising
@@ -27,6 +32,10 @@ public struct TransfersBatchTracker {
         var start: Date
         /// When the first bytes started to move (the sample just before the counter first advanced).
         var clockStart: Date?
+        /// Bytes that moved before the batch was first seen, and when that was; the last idle sample's time.
+        var preBytes: Int64 = 0
+        var seen: Date?
+        var idleTime: Date?
         /// Time of the previous sample, to back-date `clockStart`.
         var prevTime: Date
         var lastProgress: Date
@@ -66,6 +75,7 @@ public struct TransfersBatchTracker {
             if let mark = idleMark, let counter = stats?.bytes, counter >= mark.counter {
                 a.lastCounter = mark.counter
                 a.prevTime = mark.time
+                if counter > mark.counter { a.preBytes = counter - mark.counter; a.seen = now; a.idleTime = mark.time }
             }
             idleMark = nil
             active = a
@@ -81,7 +91,18 @@ public struct TransfersBatchTracker {
             if a.stalled || a.lastCounter == nil { return .finished(nil) }
             let queued = a.files.values.reduce(0, +)
             let bytes = queued > 0 ? min(a.counted, queued) : a.counted
-            let begin = a.clockStart ?? a.start
+            var begin = a.clockStart ?? a.start
+            if a.preBytes > 0, let seen = a.seen, let idleTime = a.idleTime {
+                // Late first sighting: back-date from the rate measured since then.
+                let after = a.counted - a.preBytes
+                let span = a.lastProgress.timeIntervalSince(seen)
+                if after > 0, span > 0 {
+                    let rate = Double(after) / span
+                    begin = max(idleTime, seen.addingTimeInterval(-Double(a.preBytes) / rate))
+                } else {
+                    begin = idleTime
+                }
+            }
             let end = a.lastProgress > begin ? a.lastProgress : now
             return .finished(UploadBatch(bytes: bytes, duration: end.timeIntervalSince(begin),
                                          fileCount: a.files.count,

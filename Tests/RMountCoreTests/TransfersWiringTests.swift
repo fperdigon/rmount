@@ -179,10 +179,20 @@ final class TransfersBatchTrackerTests: XCTestCase {
         var t = TransfersBatchTracker()
         XCTAssertNil(t.observe(queue: VFSQueue(), stats: stats(1_000), now: at(0)))     // idle sample
         let q = VFSQueue(queue: [entry(1, size: 600_000_000)])
-        // Seen 5 s later with 100 MB already moved: those bytes count and the clock starts at the idle sample.
+        // Seen 5 s later with 100 MB already moved: those bytes count and the start is estimated from the later
+        // rate (500 MB in 15 s): 100 MB earlier is 3 s before the sighting.
         XCTAssertNotNil(t.observe(queue: q, stats: stats(100_001_000), now: at(5)))
         let event = t.observe(queue: VFSQueue(), stats: stats(600_001_000), now: at(20))
-        XCTAssertEqual(event, .finished(UploadBatch(bytes: 600_000_000, duration: 20, fileCount: 1)))
+        XCTAssertEqual(event, .finished(UploadBatch(bytes: 600_000_000, duration: 18, fileCount: 1)))
+    }
+
+    func testLateSightingWithNoBytesAfterwardsFallsBackToTheIdleSample() {
+        var t = TransfersBatchTracker()
+        _ = t.observe(queue: VFSQueue(), stats: stats(0), now: at(0))
+        let q = VFSQueue(queue: [entry(1, size: 100_000_000)])
+        _ = t.observe(queue: q, stats: stats(100_000_000), now: at(10))
+        let event = t.observe(queue: VFSQueue(), stats: stats(100_000_000), now: at(11.5))
+        XCTAssertEqual(event, .finished(UploadBatch(bytes: 100_000_000, duration: 10, fileCount: 1)))
     }
 
     func testIdleMarkFromAResetCounterIsIgnored() {
@@ -203,7 +213,55 @@ final class TransfersBatchTrackerTests: XCTestCase {
         _ = t.observe(queue: q2, stats: stats(120_000_000), now: at(12))      // 20 MB moved since the drain
         guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(150_000_000), now: at(14)) else { return XCTFail() }
         XCTAssertEqual(b.bytes, 50_000_000)
-        XCTAssertEqual(b.duration, 4, accuracy: 0.001)
+        XCTAssertEqual(b.duration, 10.0 / 3, accuracy: 0.01)   // 20 MB were already moved at the sighting; 30 MB in 2 s = 15 MB/s
+    }
+
+    /// Replays one 600 MB batch at a constant rate against the tracker: an idle sample at 0, the queue entry
+    /// appearing halfway to the first sighting at `delay` (a 15 s idle poll), uploads starting 5 s after the entry
+    /// (write-back), then a sample every 1.5 s. Returns the measured batch.
+    private func simulate(rate: Double, delay: TimeInterval) -> UploadBatch? {
+        var t = TransfersBatchTracker()
+        _ = t.observe(queue: VFSQueue(), stats: stats(0), now: at(0))
+        let begin = delay * 0.5 + 5
+        let end = begin + 600 / rate
+        func counter(_ x: TimeInterval) -> Int64 { Int64(min(max(x - begin, 0) * rate, 600) * 1_000_000) }
+        let q = VFSQueue(queue: [entry(1, size: 600_000_000)])
+        var x = max(delay, 0.1)
+        for _ in 0..<400 {
+            let event = t.observe(queue: x < end ? q : VFSQueue(), stats: stats(counter(x)), now: at(x))
+            if case .finished(let b)? = event { return b }
+            x += 1.5
+        }
+        return nil
+    }
+
+    func testFastArmsAreNotPenalisedByALateFirstSighting() {
+        for delay in stride(from: 0.0, through: 15.0, by: 1.5) {
+            for rate in [10.0, 20.0, 40.0] {
+                guard let b = simulate(rate: rate, delay: delay) else { return XCTFail("no batch \(rate) \(delay)") }
+                let measured = Double(b.bytes) / 1_000_000 / b.duration
+                XCTAssertEqual(measured, rate, accuracy: rate * 0.2, "rate \(rate) delay \(delay): \(b)")
+            }
+        }
+    }
+
+    func testBanditReachesTheFastArmWithLateFirstSightings() {
+        let curve: [Int: Double] = [2: 10, 4: 20, 8: 40, 12: 32, 16: 25]
+        var now = t0
+        let rng = SeededUnitRandom(seed: 3)
+        var bandit = TransfersBandit(clock: { now }, random: { rng.next() })
+        var arms: [Int] = []
+        for i in 0..<50 {
+            now = now.addingTimeInterval(300)
+            let arm = bandit.chooseArm(for: .large)
+            arms.append(arm)
+            let delay = Double(i % 11) * 1.5
+            if let b = simulate(rate: curve[arm]!, delay: delay) { bandit.record(b, arm: arm, bucket: .large) }
+        }
+        XCTAssertTrue(arms.prefix(10).contains(8), "\(arms)")
+        XCTAssertEqual(bandit.bestArm(for: .large), 8)
+        let tail = arms.dropFirst(10)
+        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 8 }.count) / Double(tail.count), 0.8, "\(arms)")
     }
 
     func testRateLimitTextDetection() {
