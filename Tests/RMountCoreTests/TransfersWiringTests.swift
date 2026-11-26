@@ -432,6 +432,7 @@ final class TransfersSessionTests: XCTestCase {
             mounter: FakeMounter(), logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone.binary,
             transfersBanditDirectory: banditDir, transfersRandom: { 0.99 },
             controlClient: { s in client ?? URLSessionRcloneControlClient(port: s.rcPort, user: s.rcUser, password: s.rcPassword) })
+        manager.allowMissingHostKeyVerifier = true
         addTeardownBlock { @MainActor in
             manager.shutdownAll()
             for s in manager.sessions { try? await manager.delete(s.id) }
