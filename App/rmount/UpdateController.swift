@@ -61,7 +61,7 @@ final class UpdateController {
         var text = "You're on \(running).\n\(update.label) is available on the \(update.channel.displayName.lowercased()) channel."
         let notes = update.release.notesExcerpt()
         if !notes.isEmpty { text += "\n\n\(notes)" }
-        text += "\n\nInstalling quits RMount (mounted remotes are unmounted) and reopens the new version."
+        text += "\n\nInstalling quits RMount (mounted remotes are unmounted) and reopens the new version.\n\nAfter an update macOS may ask, once per remote, to let RMount use its saved password. Choose Always Allow."
         alert.informativeText = text
         alert.addButton(withTitle: "Install and relaunch")
         alert.addButton(withTitle: "Release notes")
