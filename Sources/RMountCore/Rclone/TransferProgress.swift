@@ -31,10 +31,20 @@ public struct RcloneStats: Decodable, Equatable {
     }
 
     public let transferring: [Transfer]
-    public init(transferring: [Transfer] = []) { self.transferring = transferring }
-    private enum CodingKeys: String, CodingKey { case transferring }
+    /// Cumulative bytes transferred since rclone started (uploads and downloads); used to time upload batches.
+    public let bytes: Int64?
+    /// Cumulative error count and the last error text (rclone's pacer retries 429s silently).
+    public let errors: Int?
+    public let lastError: String?
+    public init(transferring: [Transfer] = [], bytes: Int64? = nil, errors: Int? = nil, lastError: String? = nil) {
+        self.transferring = transferring; self.bytes = bytes; self.errors = errors; self.lastError = lastError
+    }
+    private enum CodingKeys: String, CodingKey { case transferring, bytes, errors, lastError }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        bytes = try? c.decodeIfPresent(Int64.self, forKey: .bytes)
+        errors = try? c.decodeIfPresent(Int.self, forKey: .errors)
+        lastError = try? c.decodeIfPresent(String.self, forKey: .lastError)
         // Decode entries independently so one malformed row does not hide healthy transfers.
         guard var rows = try? c.nestedUnkeyedContainer(forKey: .transferring) else {
             transferring = []; return

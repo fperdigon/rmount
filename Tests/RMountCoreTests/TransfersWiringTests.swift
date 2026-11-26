@@ -1,0 +1,1192 @@
+import XCTest
+@testable import RMountCore
+
+private actor TransfersClient: RcloneControlClient {
+    var applied: [Int] = []
+    var fails = false
+    func vfsQueue() async throws -> VFSQueue { VFSQueue() }
+    func setTransfers(_ count: Int) async throws {
+        if fails { throw URLError(.cannotConnectToHost) }
+        applied.append(count)
+    }
+    func failSets() { fails = true }
+}
+
+private final class RecordingURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var seen: URLRequest?
+    nonisolated(unsafe) static var body: Data?
+    nonisolated(unsafe) static var status = 200
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Self.seen = request
+        if let s = request.httpBodyStream {
+            s.open(); defer { s.close() }
+            var data = Data(); var buf = [UInt8](repeating: 0, count: 1024)
+            while s.hasBytesAvailable { let n = s.read(&buf, maxLength: buf.count); if n <= 0 { break }; data.append(buf, count: n) }
+            Self.body = data
+        } else { Self.body = request.httpBody }
+        let r = HTTPURLResponse(url: request.url!, statusCode: Self.status, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: r, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("{}".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+private func entry(_ id: UInt64, size: Int64 = 100_000_000, uploading: Bool = true, tries: Int = 0, name: String? = nil) -> VFSQueue.Entry {
+    VFSQueue.Entry(name: name ?? "f\(id)", id: id, size: size, uploading: uploading, tries: tries)
+}
+
+// MARK: - Batch tracker
+
+final class TransfersBatchTrackerTests: XCTestCase {
+    private let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+    private func at(_ s: TimeInterval) -> Date { t0.addingTimeInterval(s) }
+    private func stats(_ bytes: Int64, errors: Int = 0, last: String? = nil) -> RcloneStats {
+        RcloneStats(bytes: bytes, errors: errors, lastError: last)
+    }
+
+    func testIdleQueueProducesNothing() {
+        var t = TransfersBatchTracker()
+        XCTAssertNil(t.observe(queue: VFSQueue(), stats: stats(0), now: at(0)))
+        XCTAssertFalse(t.isActive)
+    }
+
+    func testSidecarsAloneDoNotStartABatch() {
+        var t = TransfersBatchTracker()
+        let q = VFSQueue(queue: [entry(1, name: "dir/._x")])
+        XCTAssertNil(t.observe(queue: q, stats: stats(0), now: at(0)))
+    }
+
+    func testBatchStartsAndFinishesWithBytesDurationAndFiles() {
+        var t = TransfersBatchTracker()
+        let q = VFSQueue(queue: [entry(1), entry(2)])
+        XCTAssertEqual(t.observe(queue: q, stats: stats(1_000), now: at(0)), .started(fileCount: 2, bytes: 200_000_000))
+        XCTAssertNil(t.observe(queue: q, stats: stats(60_001_000), now: at(10)))
+        XCTAssertNil(t.observe(queue: q, stats: stats(160_001_000), now: at(30)))
+        let event = t.observe(queue: VFSQueue(), stats: stats(200_001_000), now: at(33))
+        XCTAssertEqual(event, .finished(UploadBatch(bytes: 200_000_000, duration: 33, fileCount: 2)))
+        XCTAssertFalse(t.isActive)
+    }
+
+    func testBytesAreCappedByQueuedSizes() {
+        var t = TransfersBatchTracker()
+        let q = VFSQueue(queue: [entry(1, size: 10_000_000)])
+        _ = t.observe(queue: q, stats: stats(0), now: at(0))
+        _ = t.observe(queue: q, stats: stats(900_000_000), now: at(10))   // a download ran meanwhile
+        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(900_000_000), now: at(12)) else { return XCTFail() }
+        XCTAssertEqual(b.bytes, 10_000_000)
+    }
+
+    func testFilesAddedDuringBatchAreCounted() {
+        var t = TransfersBatchTracker()
+        _ = t.observe(queue: VFSQueue(queue: [entry(1)]), stats: stats(0), now: at(0))
+        _ = t.observe(queue: VFSQueue(queue: [entry(1), entry(2)]), stats: stats(50_000_000), now: at(5))
+        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(200_000_000), now: at(10)) else { return XCTFail() }
+        XCTAssertEqual(b.fileCount, 2)
+    }
+
+    func testTheSameUploadAtThreeTriesOrMoreAcrossPollsMarksRateLimited() {
+        var t = TransfersBatchTracker()
+        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 2)]), stats: stats(0), now: at(0))
+        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 3)]), stats: stats(1_000_000), now: at(5))
+        XCTAssertFalse(t.takeFlags().rateLimited)                                                     // first time at 3
+        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 3)]), stats: stats(2_000_000), now: at(10))
+        XCTAssertTrue(t.takeFlags().rateLimited)                                                      // still retrying the same upload
+        XCTAssertFalse(t.lastSignal.isEmpty)
+    }
+
+    func testOneTryPerUploadAndFluctuatingDelayAreNotARateLimit() {
+        // The failing VM run: tries stayed at 1, errors at 0, and the queue's delay field kept changing.
+        var t = TransfersBatchTracker()
+        func q(_ delay: Double) -> VFSQueue {
+            VFSQueue(queue: (1...12).map { VFSQueue.Entry(name: "f\($0)", id: UInt64($0), size: 100_000_000, uploading: $0 <= 6, tries: 1, delay: delay) })
+        }
+        _ = t.observe(queue: q(5), stats: stats(0, errors: 0), now: at(0))
+        for (i, d) in [4.0, 9.0, 2.0, 30.0, 1.0, 14.0, 60.0, 3.0].enumerated() {
+            _ = t.observe(queue: q(d), stats: stats(Int64(i + 1) * 10_000_000, errors: 0), now: at(Double(i + 1) * 1.5))
+            let f = t.takeFlags()
+            XCTAssertFalse(f.rateLimited)
+            XCTAssertFalse(f.failed)
+        }
+        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(500_000_000, errors: 0), now: at(40)) else { return XCTFail() }
+        XCTAssertFalse(b.rateLimited)
+    }
+
+    func testASingleRetryIsNotARateLimit() {
+        var t = TransfersBatchTracker()
+        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 1)]), stats: stats(0), now: at(0))
+        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 1)]), stats: stats(1_000_000), now: at(5))
+        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 2)]), stats: stats(2_000_000), now: at(10))   // one retry
+        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(100_000_000), now: at(20)) else { return XCTFail() }
+        XCTAssertFalse(b.rateLimited)
+    }
+
+    func testAStickyLastErrorWithoutNewErrorsIsIgnored() {
+        var t = TransfersBatchTracker()
+        _ = t.observe(queue: VFSQueue(queue: [entry(1)]), stats: stats(0, errors: 3, last: "HTTP 429 too many requests"), now: at(0))
+        _ = t.observe(queue: VFSQueue(queue: [entry(1)]), stats: stats(1_000_000, errors: 3, last: "HTTP 429 too many requests"), now: at(5))
+        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(100_000_000, errors: 3, last: "HTTP 429 too many requests"), now: at(20)) else { return XCTFail() }
+        XCTAssertFalse(b.rateLimited)
+        XCTAssertFalse(b.failed)
+    }
+
+    func testThrottlingErrorMarksRateLimited() {
+        var t = TransfersBatchTracker()
+        _ = t.observe(queue: VFSQueue(queue: [entry(1)]), stats: stats(0), now: at(0))
+        _ = t.observe(queue: VFSQueue(queue: [entry(1)]), stats: stats(1, errors: 1, last: "googleapi: Error 403: User rate limit exceeded"), now: at(5))
+        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(100_000_000, errors: 1), now: at(20)) else { return XCTFail() }
+        XCTAssertTrue(b.rateLimited)
+    }
+
+    func testOtherErrorMarksFailedEvenWithRetries() {
+        var t = TransfersBatchTracker()
+        _ = t.observe(queue: VFSQueue(queue: [entry(1)]), stats: stats(0), now: at(0))
+        _ = t.observe(queue: VFSQueue(queue: [entry(1, tries: 3)]), stats: stats(1, errors: 1, last: "connection reset by peer"), now: at(5))
+        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(100_000_000, errors: 1), now: at(20)) else { return XCTFail() }
+        XCTAssertTrue(b.failed)
+        XCTAssertFalse(b.rateLimited)
+    }
+
+    func testErrorsPresentBeforeTheBatchAreIgnored() {
+        var t = TransfersBatchTracker()
+        _ = t.observe(queue: VFSQueue(queue: [entry(1)]), stats: stats(0, errors: 5, last: "429"), now: at(0))
+        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(100_000_000, errors: 5, last: "429"), now: at(20)) else { return XCTFail() }
+        XCTAssertFalse(b.rateLimited); XCTAssertFalse(b.failed)
+    }
+
+    func testStalledBatchIsIgnored() {
+        var t = TransfersBatchTracker()
+        let q = VFSQueue(queue: [entry(1)])
+        _ = t.observe(queue: q, stats: stats(0), now: at(0))
+        _ = t.observe(queue: q, stats: stats(10_000_000), now: at(10))
+        XCTAssertNil(t.observe(queue: q, stats: stats(10_000_000), now: at(120)))   // 110 s without bytes
+        XCTAssertEqual(t.observe(queue: VFSQueue(), stats: stats(10_000_000), now: at(125)), .finished(nil))
+    }
+
+    func testRecoveryAfterAStallStillCounts() {
+        var t = TransfersBatchTracker()
+        let q = VFSQueue(queue: [entry(1, size: 100_000_000)])
+        _ = t.observe(queue: q, stats: stats(0), now: at(0))
+        _ = t.observe(queue: q, stats: stats(0), now: at(100))     // stalled
+        _ = t.observe(queue: q, stats: stats(50_000_000), now: at(110))
+        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(100_000_000), now: at(130)) else { return XCTFail() }
+        XCTAssertEqual(b.bytes, 100_000_000)
+    }
+
+    func testIdleForTooLongEndsTheBatchIgnored() {
+        var t = TransfersBatchTracker()
+        let q = VFSQueue(queue: [entry(1, uploading: false)])
+        _ = t.observe(queue: q, stats: stats(0), now: at(0))
+        XCTAssertEqual(t.observe(queue: q, stats: stats(0), now: at(700)), .finished(nil))
+        XCTAssertFalse(t.isActive)
+        XCTAssertNotNil(t.observe(queue: q, stats: stats(0), now: at(701)))   // a new batch begins
+    }
+
+    func testNoByteCounterMeansIgnored() {
+        var t = TransfersBatchTracker()
+        let q = VFSQueue(queue: [entry(1)])
+        _ = t.observe(queue: q, stats: nil, now: at(0))
+        XCTAssertNil(t.observe(queue: q, stats: nil, now: at(200)))    // no stall verdict without a counter
+        XCTAssertEqual(t.observe(queue: VFSQueue(), stats: nil, now: at(210)), .finished(nil))
+    }
+
+    func testCounterResetDoesNotGoNegative() {
+        var t = TransfersBatchTracker()
+        let q = VFSQueue(queue: [entry(1, size: 100_000_000)])
+        _ = t.observe(queue: q, stats: stats(500_000_000), now: at(0))
+        _ = t.observe(queue: q, stats: stats(10), now: at(5))   // rclone restarted
+        guard case .finished(let b?) = t.observe(queue: VFSQueue(), stats: stats(60_000_010), now: at(20)) else { return XCTFail() }
+        XCTAssertEqual(b.bytes, 60_000_000)
+    }
+
+    func testRateLimitTextDetection() {
+        for s in ["HTTP 429", "http error 429: slow", "status code 429", "429 Too Many Requests", "Too Many Requests", "rateLimitExceeded",
+                  "googleapi: Error 403: userRateLimitExceeded", "SlowDown: reduce rate", "request throttled"] {
+            XCTAssertTrue(TransfersBatchTracker.looksRateLimited(s), s)
+        }
+        for s in ["connection refused", "storageQuotaExceeded", "quota exceeded", "failed to copy report429.pdf", "open /data/4290/file",
+                  "size 14290 bytes"] {
+            XCTAssertFalse(TransfersBatchTracker.looksRateLimited(s), s)
+        }
+    }
+}
+
+// MARK: - Controller
+
+@MainActor
+final class TransfersControllerTests: XCTestCase {
+    private var dir: URL!
+    private var now = Date(timeIntervalSince1970: 1_700_000_000)
+    private var logs: [String] = []
+
+    override func setUpWithError() throws { dir = try makeTempDir() }
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: dir) }
+
+    private func make(_ remote: Remote, arm: Int = 4, client: TransfersClient,
+                      random: @escaping () -> Double = { 0 }) -> TransfersController {
+        TransfersController(remote: remote, startingArm: arm, store: TransfersBanditStore(directory: dir), client: client,
+                            random: random, clock: { [unowned self] in self.now }, log: { [unowned self] in self.logs.append($0) })
+    }
+
+    private func stats(_ b: Int64) -> RcloneStats { RcloneStats(bytes: b) }
+
+    private func runBatch(_ c: TransfersController, bytes: Int64 = 600_000_000, seconds: TimeInterval = 40) async {
+        let q = VFSQueue(queue: [entry(1, size: bytes)])
+        await c.observe(queue: q, stats: stats(0))
+        now = now.addingTimeInterval(seconds)
+        await c.observe(queue: q, stats: stats(bytes))
+        await c.observe(queue: VFSQueue(), stats: stats(bytes))
+    }
+
+    func testNextArmIsAppliedWhileIdleSoItIsInForceBeforeTheBatch() async {
+        let client = TransfersClient()
+        let c = make(makeRemote(backend: sftpBackend()), client: client)
+        // At startup the first batch measures the prior itself: nothing to change.
+        await c.observe(queue: VFSQueue(), stats: stats(0))
+        var applied = await client.applied
+        XCTAssertTrue(applied.isEmpty)
+        await runBatch(c)
+        // The batch drained: the next arm (closest neighbour of the prior, 3) is set now, with the queue empty.
+        applied = await client.applied
+        XCTAssertEqual(applied, [3])
+        XCTAssertEqual(c.currentArm, 3)
+        XCTAssertTrue(logs.contains { $0.contains("4 -> 3") })
+        // The following batch starts without any change and is credited to arm 2.
+        await runBatch(c)
+        applied = await client.applied
+        XCTAssertEqual(applied.first, 3)
+        XCTAssertEqual(c.bandit.stats(for: .large, arm: 3)?.count, 1)
+        XCTAssertEqual(c.bandit.stats(for: .large, arm: 4)?.count, 1)
+    }
+
+    func testIdleSampleAtStartupAppliesTheChoiceAfterRestart() async throws {
+        // A remote that already measured arm 4 (and has arm 3 next to probe): the probe is applied on the first idle sample.
+        let remote = makeRemote(backend: sftpBackend())
+        var seed = TransfersBandit(clock: { self.now }, random: { 0.99 })
+        seed.record(UploadBatch(bytes: 600_000_000, duration: 30, fileCount: 6), arm: 4)
+        try TransfersBanditStore(directory: dir).save(seed.state, remote: remote.id.uuidString)
+        let client = TransfersClient()
+        let c = make(remote, client: client)
+        await c.observe(queue: VFSQueue(), stats: stats(0))
+        let applied = await client.applied
+        XCTAssertEqual(applied, [3])
+        XCTAssertEqual(c.currentArm, 3)
+    }
+
+    func testNothingIsAppliedWhileABatchIsRunning() async {
+        let client = TransfersClient()
+        let c = make(makeRemote(backend: sftpBackend()), client: client)
+        // First sample already has a batch in flight: it runs with the arm rclone started with.
+        let q = VFSQueue(queue: [entry(1, size: 600_000_000)])
+        await c.observe(queue: q, stats: stats(0))
+        now = now.addingTimeInterval(20)
+        await c.observe(queue: q, stats: stats(300_000_000))
+        var applied = await client.applied
+        XCTAssertTrue(applied.isEmpty)
+        now = now.addingTimeInterval(20)
+        await c.observe(queue: VFSQueue(), stats: stats(600_000_000))
+        XCTAssertEqual(c.bandit.stats(for: .large, arm: 4)?.count, 1)
+        applied = await client.applied
+        XCTAssertEqual(applied, [3])      // chosen only once the queue drained
+    }
+
+    func testNoApplyWhenArmUnchanged() async {
+        let client = TransfersClient()
+        let c = make(makeRemote(backend: sftpBackend()), client: client, random: { 0.99 })
+        await c.observe(queue: VFSQueue(), stats: stats(0))
+        await c.observe(queue: VFSQueue(queue: [entry(1)]), stats: stats(0))
+        let applied = await client.applied
+        XCTAssertTrue(applied.isEmpty)
+        XCTAssertEqual(c.currentArm, 4)
+    }
+
+    func testFailedApplyKeepsArmAndRecordsAgainstIt() async {
+        let client = TransfersClient()
+        await client.failSets()
+        let c = make(makeRemote(backend: sftpBackend()), client: client)
+        await runBatch(c)
+        await runBatch(c)
+        XCTAssertEqual(c.currentArm, 4)
+        XCTAssertEqual(c.bandit.stats(for: .large, arm: 4)?.count, 2)
+        XCTAssertNil(c.bandit.stats(for: .large, arm: 2))
+        XCTAssertTrue(logs.contains { $0.contains("could not set") })
+    }
+
+    func testFinishedBatchIsRecordedAndPersisted() async throws {
+        let client = TransfersClient()
+        let remote = makeRemote(backend: sftpBackend())
+        let c = make(remote, client: client)
+        await runBatch(c)
+        let saved = try XCTUnwrap(TransfersBanditStore(directory: dir).load(remote: remote.id.uuidString))
+        XCTAssertEqual(saved.buckets["large"]?.stats["4"]?.count, 1)
+        XCTAssertEqual(try XCTUnwrap(saved.buckets["large"]?.stats["4"]).mean, 15, accuracy: 0.01)   // 600 MB / 40 s
+    }
+
+    func testStartupArmUsesPriorThenBestMeasured() throws {
+        let store = TransfersBanditStore(directory: dir)
+        let s3 = makeRemote(backend: s3Backend())
+        XCTAssertEqual(TransfersController.startupArm(for: s3, store: store), 8)
+        var bandit = TransfersBandit(state: BanditState(), clock: { self.now }, random: { 0.99 })
+        bandit.record(UploadBatch(bytes: 600_000_000, duration: 60, fileCount: 2), arm: 12, bucket: .large)
+        try store.save(bandit.state, remote: s3.id.uuidString)
+        XCTAssertEqual(TransfersController.startupArm(for: s3, store: store), 12)
+    }
+
+    func testDriveArmsAreCappedAtEight() {
+        let config = BanditConfiguration.forBackend("drive")
+        XCTAssertEqual(config.arms, [1, 2, 3, 4, 6, 8])
+        XCTAssertEqual(config.startingArm, 8)
+        XCTAssertEqual(BanditConfiguration.forBackend("sftp").arms, BanditConfiguration.defaultArms)
+        let drive = makeRemote(backend: driveBackend())
+        XCTAssertEqual(drive.transfersBackendID, "drive")
+        XCTAssertEqual(TransfersController.startupArm(for: drive, store: TransfersBanditStore(directory: dir)), 8)
+    }
+
+    func testBackendIDs() {
+        XCTAssertEqual(makeRemote(backend: sftpBackend()).transfersBackendID, "sftp")
+        XCTAssertEqual(makeRemote(backend: s3Backend()).transfersBackendID, "s3")
+        XCTAssertEqual(makeRemote(backend: ftpBackend()).transfersBackendID, "ftp")
+        XCTAssertEqual(makeRemote(backend: webdavBackend()).transfersBackendID, "webdav")
+    }
+
+    func testStoreRemoveDeletesTheFile() throws {
+        let store = TransfersBanditStore(directory: dir)
+        try store.save(BanditState(), remote: "abc")
+        XCTAssertNotNil(store.load(remote: "abc"))
+        store.remove(remote: "abc")
+        XCTAssertNil(store.load(remote: "abc"))
+        store.remove(remote: "abc")   // missing is fine
+    }
+}
+
+// MARK: - Model and client
+
+final class TransfersModelTests: XCTestCase {
+    func testRemoteWithoutAutoTransfersDecodesAsOn() throws {
+        let id = UUID().uuidString
+        let json = """
+        {"id":"\(id)","name":"n","mountProtocol":"webdav","autoMount":false,
+         "backend":{"sftp":{"_0":{"host":"h","port":22,"user":"u","remotePath":"/","authKind":"password"}}}}
+        """
+        let r = try JSONDecoder().decode(Remote.self, from: Data(json.utf8))
+        XCTAssertTrue(r.autoTransfers)
+    }
+
+    func testAutoTransfersRoundTripsAndToleratesGarbage() throws {
+        var r = makeRemote(backend: sftpBackend())
+        r.autoTransfers = false
+        let data = try JSONEncoder().encode(r)
+        XCTAssertFalse(try JSONDecoder().decode(Remote.self, from: data).autoTransfers)
+        var obj = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        obj["autoTransfers"] = "yes"
+        let bad = try JSONSerialization.data(withJSONObject: obj)
+        XCTAssertTrue(try JSONDecoder().decode(Remote.self, from: bad).autoTransfers)
+    }
+
+    func testStatsDecodeBytesAndErrorsTolerantly() throws {
+        let s = try JSONDecoder().decode(RcloneStats.self, from: Data(#"{"bytes":123,"errors":2,"lastError":"429 slow","transferring":[]}"#.utf8))
+        XCTAssertEqual(s.bytes, 123); XCTAssertEqual(s.errors, 2); XCTAssertEqual(s.lastError, "429 slow")
+        let odd = try JSONDecoder().decode(RcloneStats.self, from: Data(#"{"bytes":"x","errors":null}"#.utf8))
+        XCTAssertNil(odd.bytes); XCTAssertNil(odd.errors)
+    }
+
+    func testSetTransfersPostsOptionsSet() async throws {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [RecordingURLProtocol.self]
+        RecordingURLProtocol.status = 200
+        let client = URLSessionRcloneControlClient(port: 43210, user: "u", password: "p", session: URLSession(configuration: cfg))
+        try await client.setTransfers(8)
+        XCTAssertEqual(RecordingURLProtocol.seen?.url?.absoluteString, "http://127.0.0.1:43210/options/set")
+        XCTAssertEqual(RecordingURLProtocol.seen?.httpMethod, "POST")
+        let body = try XCTUnwrap(RecordingURLProtocol.body)
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: [String: Int]])
+        XCTAssertEqual(obj["main"]?["Transfers"], 8)
+        RecordingURLProtocol.status = 500
+        do { try await client.setTransfers(4); XCTFail("expected failure") } catch {}
+        RecordingURLProtocol.status = 200
+        let records = try await client.coreTransferred()
+        XCTAssertEqual(RecordingURLProtocol.seen?.url?.absoluteString, "http://127.0.0.1:43210/core/transferred")
+        XCTAssertTrue(records.isEmpty)
+        RecordingURLProtocol.status = 500
+        do { _ = try await client.coreTransferred(); XCTFail("expected failure") } catch {}
+    }
+
+    func testDefaultClientRejectsSetTransfers() async {
+        struct Bare: RcloneControlClient { func vfsQueue() async throws -> VFSQueue { VFSQueue() } }
+        do { try await Bare().setTransfers(4); XCTFail() } catch {}
+    }
+}
+
+// MARK: - SessionManager wiring
+
+@MainActor
+final class TransfersSessionTests: XCTestCase {
+    private func fixture(_ banditDir: URL?, client: RcloneControlClient? = nil) throws -> (SessionManager, FakeRclone, URL) {
+        try FakeRclone.requirePython()
+        let dir = try makeTempDir()
+        let rclone = try FakeRclone.make(in: dir)
+        let manager = SessionManager(
+            store: RemoteStore(directory: dir), keychain: KeychainService(serviceName: "rmount.tests.\(UUID().uuidString)"),
+            mounter: FakeMounter(), logsDir: dir.appendingPathComponent("logs"), rcloneBinary: rclone.binary,
+            transfersBanditDirectory: banditDir, transfersRandom: { 0.99 },
+            controlClient: { s in client ?? URLSessionRcloneControlClient(port: s.rcPort, user: s.rcUser, password: s.rcPassword) })
+        manager.allowMissingHostKeyVerifier = true
+        addTeardownBlock { @MainActor in
+            manager.shutdownAll()
+            for s in manager.sessions { try? await manager.delete(s.id) }
+            try? FileManager.default.removeItem(at: dir)
+        }
+        return (manager, rclone, dir)
+    }
+    private let pw = SFTPSecrets(password: "pw", privateKeyPath: nil, keyPassphrase: nil)
+
+    func testMountPassesBestKnownTransfersAndReportsIt() async throws {
+        let bandit = try makeTempDir()
+        let (m, rclone, _) = try fixture(bandit, client: TransfersClient())
+        let r = makeRemote(backend: sftpBackend())
+        try m.add(r, sftpSecrets: pw)
+        try await m.mount(remoteID: r.id)
+        let lines = rclone.recordedLines()
+        let i = try XCTUnwrap(lines.firstIndex(of: "--transfers"))
+        XCTAssertEqual(lines[i + 1], "4")
+        XCTAssertEqual(m.transfersParallelism[r.id], 4)
+        try await m.unmount(remoteID: r.id)
+        XCTAssertNil(m.transfersParallelism[r.id])
+    }
+
+    func testMountUsesLearnedArm() async throws {
+        let bandit = try makeTempDir()
+        let r = makeRemote(backend: sftpBackend())
+        var b = TransfersBandit(random: { 0.99 })
+        b.record(UploadBatch(bytes: 600_000_000, duration: 60, fileCount: 2), arm: 12, bucket: .large)
+        try TransfersBanditStore(directory: bandit).save(b.state, remote: r.id.uuidString)
+        let (m, rclone, _) = try fixture(bandit, client: TransfersClient())
+        try m.add(r, sftpSecrets: pw)
+        try await m.mount(remoteID: r.id)
+        let lines = rclone.recordedLines()
+        XCTAssertEqual(lines[try XCTUnwrap(lines.firstIndex(of: "--transfers")) + 1], "12")
+        try await m.unmount(remoteID: r.id)
+    }
+
+    func testNoTransfersFlagWhenOffReadOnlyOrNoDirectory() async throws {
+        for mode in 0..<3 {
+            let (m, rclone, _) = try fixture(mode == 2 ? nil : try makeTempDir(), client: TransfersClient())
+            var r = makeRemote(backend: sftpBackend())
+            if mode == 0 { r.autoTransfers = false }
+            if mode == 1 { r.readOnly = true }
+            try m.add(r, sftpSecrets: pw)
+            try await m.mount(remoteID: r.id)
+            XCTAssertFalse(rclone.recordedLines().contains("--transfers"), "mode \(mode)")
+            XCTAssertNil(m.transfersParallelism[r.id])
+            try await m.unmount(remoteID: r.id)
+        }
+    }
+
+    func testDeletingARemoteRemovesItsLearnedState() async throws {
+        let bandit = try makeTempDir()
+        let (m, _, _) = try fixture(bandit)
+        let r = makeRemote(backend: sftpBackend())
+        try m.add(r, sftpSecrets: pw)
+        let store = TransfersBanditStore(directory: bandit)
+        try store.save(BanditState(), remote: r.id.uuidString)
+        try await m.delete(r.id)
+        XCTAssertNil(store.load(remote: r.id.uuidString))
+    }
+}
+
+// MARK: - Records (core/transferred)
+
+/// Throughput of a link whose best `--transfers` is `peak`: 40 MB/s there, 8 MB/s less per arm step away (at least 5).
+private func peakRate(_ arm: Int, peak: Int) -> Double {
+    let arms = BanditConfiguration.defaultArms
+    let d = abs((arms.firstIndex(of: arm) ?? 0) - (arms.firstIndex(of: peak) ?? 0))
+    return max(5, 40 - 8 * Double(d))
+}
+
+private let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+private func rec(_ name: String, _ start: TimeInterval, _ end: TimeInterval, bytes: Int64 = 100_000_000,
+                 error: String = "") -> CompletedTransfer {
+    CompletedTransfer(name: name, size: bytes, bytes: bytes, error: error,
+                      started: t0.addingTimeInterval(start), completed: t0.addingTimeInterval(end))
+}
+
+final class CompletedTransferTests: XCTestCase {
+    func testParsesRcloneOutputWithOffsetsAndNanoseconds() {
+        let json = """
+        {"transferred":[
+         {"error":"","name":"a.bin","size":41943040,"bytes":41943040,"checked":false,"what":"transferring",
+          "started_at":"2026-11-24T20:38:59.18202-05:00","completed_at":"2026-11-24T20:38:59.292729123-05:00","group":"g"},
+         {"error":"boom","name":"b","size":10,"bytes":3,"started_at":"2026-11-24T20:39:00Z","completed_at":"2026-11-24T20:39:02Z"},
+         {"name":"open","started_at":"2026-11-24T20:39:00Z","completed_at":"0001-01-01T00:00:00Z"},
+         {"name":"reversed","started_at":"2026-11-24T20:39:05Z","completed_at":"2026-11-24T20:39:00Z"},
+         {"name":"nodates"}, 7
+        ]}
+        """
+        let list = CompletedTransfer.parse(Data(json.utf8))
+        XCTAssertEqual(list.map(\.name), ["a.bin", "b"])
+        XCTAssertEqual(list[0].completed.timeIntervalSince(list[0].started), 0.110, accuracy: 0.002)   // millisecond precision
+        XCTAssertEqual(list[0].bytes, 41_943_040)
+        XCTAssertEqual(list[1].error, "boom")
+        XCTAssertEqual(list[1].completed.timeIntervalSince(list[1].started), 2, accuracy: 0.001)
+    }
+
+    func testGarbageParsesToNothing() {
+        XCTAssertTrue(CompletedTransfer.parse(Data("nope".utf8)).isEmpty)
+        XCTAssertTrue(CompletedTransfer.parse(Data("{}".utf8)).isEmpty)
+        XCTAssertTrue(CompletedTransfer.parse(Data("{\"transferred\":null}".utf8)).isEmpty)
+    }
+}
+
+final class TransfersBatchBuilderTests: XCTestCase {
+    func testTransfersCloseTogetherFormOneBatchSpanningFirstStartToLastCompletion() {
+        var b = TransfersBatchBuilder()
+        b.add([rec("a", 2, 10, bytes: 200_000_000), rec("b", 3, 14, bytes: 400_000_000)])
+        let out = b.finish(now: t0.addingTimeInterval(20), queueEmpty: true, uploading: false)
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out[0].batch, UploadBatch(bytes: 600_000_000, duration: 12, fileCount: 2))
+        XCTAssertEqual(out[0].start, t0.addingTimeInterval(2))
+        XCTAssertTrue(b.hasProduced)
+        XCTAssertFalse(b.hasPending)
+    }
+
+    func testGapSplitsBatchesAndTheNewestOneWaitsWhileUploadsRun() {
+        var b = TransfersBatchBuilder()
+        b.add([rec("a", 0, 10), rec("b", 40, 50)])
+        let out = b.finish(now: t0.addingTimeInterval(52), queueEmpty: false, uploading: true)
+        XCTAssertEqual(out.count, 1)                       // "b" may still grow
+        XCTAssertTrue(b.hasPending)
+        XCTAssertTrue(b.finish(now: t0.addingTimeInterval(60), queueEmpty: false, uploading: true).isEmpty)
+        XCTAssertTrue(b.finish(now: t0.addingTimeInterval(100), queueEmpty: false, uploading: true).isEmpty)   // still uploading
+        XCTAssertEqual(b.finish(now: t0.addingTimeInterval(100), queueEmpty: false, uploading: false).count, 1)  // waiting only
+    }
+
+    func testRecordsSeenBeforeAreNotCountedTwice() {
+        var b = TransfersBatchBuilder()
+        b.add([rec("a", 0, 10)])
+        XCTAssertEqual(b.finish(now: t0.addingTimeInterval(11), queueEmpty: true, uploading: false).count, 1)
+        b.add([rec("a", 0, 10), rec("b", 60, 70)])
+        let out = b.finish(now: t0.addingTimeInterval(71), queueEmpty: true, uploading: false)
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out[0].batch.fileCount, 1)
+        XCTAssertEqual(out[0].start, t0.addingTimeInterval(60))
+    }
+
+    func testSidecarsAreIgnored() {
+        var b = TransfersBatchBuilder()
+        b.add([rec("dir/._x", 0, 10), rec("a/._b", 0, 10)])
+        XCTAssertFalse(b.hasPending)
+    }
+
+    func testErrorsFlagRateLimitOrFailureAndDoNotCountBytes() {
+        var b = TransfersBatchBuilder()
+        b.add([rec("a", 0, 10), rec("a", 1, 3, bytes: 5_000_000, error: "HTTP 429 Too Many Requests")])
+        var out = b.finish(now: t0.addingTimeInterval(11), queueEmpty: true, uploading: false)
+        XCTAssertTrue(out[0].batch.rateLimited)
+        XCTAssertFalse(out[0].batch.failed)
+        XCTAssertEqual(out[0].batch.bytes, 100_000_000)
+        b.add([rec("c", 100, 110, error: "connection reset")])
+        out = b.finish(now: t0.addingTimeInterval(111), queueEmpty: true, uploading: false)
+        XCTAssertTrue(out[0].batch.failed)
+        XCTAssertFalse(out[0].batch.rateLimited)
+    }
+
+    func testAFullListOfNothingButNewRecordsMayHaveLostOlderOnesAndIsDropped() {
+        var b = TransfersBatchBuilder()
+        b.add([rec("first", 0, 10)])
+        _ = b.finish(now: t0.addingTimeInterval(11), queueEmpty: true, uploading: false)
+        let flood = (0..<100).map { rec("f\($0)", 100 + Double($0), 101 + Double($0), bytes: 1_000) }
+        b.add(flood)
+        XCTAssertFalse(b.hasPending)
+        XCTAssertEqual(b.droppedForRetention, 100)
+        // The next poll overlaps the previous one, so its new records count again.
+        b.add(Array(flood.suffix(99)) + [rec("g", 300, 310)])
+        XCTAssertEqual(b.finish(now: t0.addingTimeInterval(311), queueEmpty: true, uploading: false).count, 1)
+    }
+}
+
+@MainActor
+final class TransfersRecordsControllerTests: XCTestCase {
+    private var dir: URL!
+    private var now = t0
+    private var logs: [String] = []
+
+    override func setUpWithError() throws { dir = try makeTempDir() }
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: dir) }
+
+    private func make(backend: Backend = sftpBackend(), arm: Int = 4, client: TransfersClient,
+                      seed: UInt64 = 5) -> TransfersController {
+        let rng = SeededUnitRandom(seed: seed)
+        return TransfersController(remote: makeRemote(backend: backend), startingArm: arm,
+                                   store: TransfersBanditStore(directory: dir), client: client, random: { rng.next() },
+                                   clock: { [unowned self] in self.now }, log: { [unowned self] in self.logs.append($0) })
+    }
+
+    private func poll(_ c: TransfersController, _ records: [CompletedTransfer], bytes: Int64 = 0) async {
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: bytes), transferred: records)
+    }
+
+    func testABatchEntirelyBetweenTwoIdlePollsIsTimedFromRclonesOwnRecords() async throws {
+        let client = TransfersClient()
+        let c = make(client: client)
+        await poll(c, [])
+        now = t0.addingTimeInterval(15)                                         // next idle poll
+        await poll(c, [rec("f", 2, 14.5, bytes: 600_000_000)], bytes: 600_000_000)
+        let s = try XCTUnwrap(c.bandit.stats(for: .large, arm: 4))
+        XCTAssertEqual(s.mean, 600 / 12.5, accuracy: 48 * 0.05)                 // bytes / span, not the poll gap
+        XCTAssertEqual(s.count, 1)
+    }
+
+    func testBatchStraddlingAnArmChangeIsDroppedAndLaterOnesAreCreditedToTheNewArm() async throws {
+        let client = TransfersClient()
+        let c = make(client: client)
+        await poll(c, [])
+        now = t0.addingTimeInterval(15)
+        let first = rec("f", 2, 14.5, bytes: 600_000_000)
+        await poll(c, [first], bytes: 600_000_000)           // credited to 4; arm 3 is applied now (t0+15)
+        XCTAssertEqual(c.currentArm, 3)
+        now = t0.addingTimeInterval(25)
+        let straddling = rec("g", 10, 20, bytes: 300_000_000)   // started before the change at 15, ended after it
+        await poll(c, [first, straddling], bytes: 900_000_000)
+        XCTAssertEqual(c.bandit.stats(for: .large, arm: 4)?.count, 1)
+        XCTAssertNil(c.bandit.stats(for: .large, arm: 3))
+        XCTAssertTrue(logs.contains { $0.contains("discarded") })
+        now = t0.addingTimeInterval(60)
+        let later = rec("h", 40, 50, bytes: 100_000_000)
+        await poll(c, [first, straddling, later], bytes: 1_000_000_000)
+        XCTAssertEqual(c.bandit.stats(for: .large, arm: 3)?.count, 1)
+        XCTAssertEqual(c.bandit.stats(for: .large, arm: 3)!.mean, 10, accuracy: 0.5)
+    }
+
+    func testStalledVerdictFromThePollsDropsTheRecordedBatch() async {
+        let client = TransfersClient()
+        let c = make(client: client)
+        let q = VFSQueue(queue: [entry(1)])
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0), transferred: [])
+        now = now.addingTimeInterval(200)
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0), transferred: [])
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 0), transferred: [rec("a", 0, 200)])
+        XCTAssertNil(c.bandit.stats(for: .large, arm: 4))
+        XCTAssertTrue(logs.contains { $0.contains("ignored") })
+    }
+
+    func testThrottledRecordPenalisesTheArm() async {
+        let client = TransfersClient()
+        let c = make(client: client)
+        await poll(c, [])
+        now = t0.addingTimeInterval(15)
+        await poll(c, [rec("f", 2, 12, bytes: 600_000_000), rec("f", 3, 5, bytes: 1_000, error: "429 rate limit")],
+                   bytes: 600_000_000)
+        XCTAssertEqual(c.bandit.stats(for: .large, arm: 4)?.count, 1)
+        XCTAssertLessThan(c.bandit.stats(for: .large, arm: 4)!.mean, 20)    // 60 MB/s x 0.25
+    }
+
+    /// Replays 600 MB batches against a throughput curve through the controller, using only rclone-style
+    /// records; the poll comes `delay` seconds (0-15) after each batch, as an idle poll would.
+    private func replay(_ c: TransfersController, peak: Int, batches: Int) async -> [Int] {
+        var arms: [Int] = []
+        var all: [CompletedTransfer] = []
+        var clockTime = 100.0
+        for i in 0..<batches {
+            let arm = c.currentArm
+            arms.append(arm)
+            let start = clockTime + 1
+            let end = start + 600 / peakRate(arm, peak: peak)
+            all.append(rec("b\(i)", start, end, bytes: 600_000_000))
+            clockTime = end + Double(i % 11) * 1.5
+            now = t0.addingTimeInterval(clockTime)
+            await poll(c, Array(all.suffix(100)), bytes: Int64(i + 1) * 600_000_000)
+            clockTime += 5
+        }
+        return arms
+    }
+
+    func testReachesArm8ForTheVMCurveWhateverTheFirstSightingDelay() async throws {
+        let c = make(client: TransfersClient())
+        let arms = await replay(c, peak: 8, batches: 60)
+        XCTAssertTrue(arms.prefix(14).contains(8), "\(arms)")
+        XCTAssertEqual(c.bandit.bestArm(for: .large), 8)
+        let tail = arms.dropFirst(14)
+        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 8 }.count) / Double(tail.count), 0.65, "\(arms)")
+        for arm in BanditConfiguration.defaultArms {
+            if let s = c.bandit.stats(for: .large, arm: arm) {
+                XCTAssertEqual(s.mean, peakRate(arm, peak: 8), accuracy: peakRate(arm, peak: 8) * 0.05, "arm \(arm)")
+            }
+        }
+    }
+
+    func testReachesArm16WhenMoreParallelismKeepsHelping() async throws {
+        let c = make(backend: s3Backend(), arm: 8, client: TransfersClient())
+        let arms = await replay(c, peak: 16, batches: 70)
+        XCTAssertTrue(arms.prefix(16).contains(16), "\(arms)")
+        XCTAssertEqual(c.bandit.bestArm(for: .large), 16)
+        let tail = arms.dropFirst(16)
+        XCTAssertGreaterThanOrEqual(Double(tail.filter { $0 == 16 }.count) / Double(tail.count), 0.65, "\(arms)")
+    }
+}
+
+private final class RecordsClient: RcloneControlClient, @unchecked Sendable {
+    var queue = VFSQueue()
+    var bytes: Int64 = 0
+    var fetches = 0
+    func vfsQueue() async throws -> VFSQueue { queue }
+    func coreStats() async throws -> RcloneStats { RcloneStats(bytes: bytes) }
+    func coreTransferred() async throws -> [CompletedTransfer] { fetches += 1; return [rec("a", 0, 1)] }
+}
+
+@MainActor
+final class UploadMonitorRecordsTests: XCTestCase {
+    func testTheSampleIsTimedAtTheStatsReadNotWhenTheSlowerCallsFinish() async {
+        final class SlowRecords: RcloneControlClient, @unchecked Sendable {
+            func vfsQueue() async throws -> VFSQueue { VFSQueue() }
+            func coreStats() async throws -> RcloneStats { RcloneStats(bytes: 1) }
+            func coreTransferred() async throws -> [CompletedTransfer] { try await Task.sleep(nanoseconds: 400_000_000); return [] }
+        }
+        var stamps: [(Date, Date)] = []
+        var started = Date()
+        let monitor = UploadMonitor(client: SlowRecords(), intervals: .init(pending: 100, idle: 100),
+                                    onSample: { _, _, _, at in stamps.append((at, Date())) }, onStatus: { _ in })
+        started = Date()
+        await monitor.refresh()
+        monitor.stop()
+        let (at, finished) = try! XCTUnwrap(stamps.first)
+        XCTAssertLessThan(at.timeIntervalSince(started), 0.2)                 // stamped at the stats read ...
+        XCTAssertGreaterThan(finished.timeIntervalSince(at), 0.3)             // ... not 0.4 s later when the slow call returned
+    }
+
+    func testTransferRecordsAreFetchedOnlyWhenBusyOrBytesMoved() async {
+        let client = RecordsClient()
+        var got: [Bool] = []
+        let monitor = UploadMonitor(client: client, intervals: .init(pending: 100, idle: 100),
+                                    onSample: { _, _, t, _ in got.append(t != nil) }, onStatus: { _ in })
+        await monitor.refresh()
+        let first = client.fetches
+        XCTAssertGreaterThanOrEqual(first, 1)
+        await monitor.refresh()                                    // idle, counter unchanged
+        XCTAssertEqual(client.fetches, first)
+        client.bytes = 10
+        await monitor.refresh()                                    // counter moved: a batch may have happened
+        XCTAssertEqual(client.fetches, first + 1)
+        client.queue = VFSQueue(queue: [VFSQueue.Entry(name: "f", id: 1, size: 10, uploading: true)])
+        await monitor.refresh()                                    // busy
+        XCTAssertEqual(client.fetches, first + 2)
+        XCTAssertEqual(got.last, true)
+        monitor.stop()
+    }
+}
+
+// MARK: - Time slices
+
+final class TransfersSliceMeterTests: XCTestCase {
+    private func at(_ s: TimeInterval) -> Date { t0.addingTimeInterval(s) }
+    private func feed(_ m: inout TransfersSliceMeter, _ points: [(TimeInterval, Int64)], contaminated: Bool = false) {
+        for (t, b) in points { m.sample(time: at(t), bytes: b, contaminated: contaminated, rateLimited: false, failed: false) }
+    }
+
+    func testRewardIsBytesOverTheMeasuredTimeEndingAtTheLastProgress() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0), (1.5, 15_000_000), (30, 600_000_000), (60, 1_200_000_000), (61.5, 1_200_000_000)])
+        let r = m.finish(endAtLastProgress: true)               // the batch ended here: the drain tail is not counted
+        XCTAssertEqual(r?.bytes, 1_200_000_000)
+        XCTAssertEqual(r!.duration, 60, accuracy: 0.001)
+        XCTAssertFalse(m.isActive)
+    }
+
+    func testASliceEndsAtItsLastSampleSoAMidSlicePauseCountsAsSlowTime() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(0), warmup: 0)
+        // 40 MB/s for 20 s, a 25 s pause, then 40 MB/s again until the slice ends at 60 s.
+        feed(&m, [(0, 0), (10, 400_000_000), (20, 800_000_000), (30, 800_000_000), (45, 800_000_000), (46.5, 860_000_000), (60, 1_400_000_000)])
+        let r = try! XCTUnwrap(m.finish())
+        XCTAssertEqual(r.bytes, 1_400_000_000)
+        XCTAssertEqual(r.duration, 60, accuracy: 0.001)
+        XCTAssertEqual(r.bytes.asMBps(r.duration), 23.3, accuracy: 0.5)            // not the 40 MB/s of a running rate
+    }
+
+    func testAHungSliceIsStalledButAShortPauseIsNot() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0), (10, 100_000_000), (40, 100_000_000), (56, 100_000_000), (60, 200_000_000)])   // 46 s without progress
+        XCTAssertNil(m.finish())
+        XCTAssertEqual(m.dropReason, "stalled")
+    }
+
+    func testWarmupAfterAnArmChangeIsSkipped() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(100), warmup: 10)
+        // Slow while the old concurrency drains, then 40 MB/s with the new arm.
+        feed(&m, [(101.5, 1_000_000), (105, 5_000_000), (110, 10_000_000), (111.5, 70_000_000), (160, 2_010_000_000)])
+        let r = m.finish()
+        XCTAssertEqual(r?.bytes, 2_000_000_000)                       // from the sample at 110 s
+        XCTAssertEqual(r!.duration, 50, accuracy: 0.001)
+        XCTAssertEqual(r!.bytes.asMBps(r!.duration), 40, accuracy: 2)
+    }
+
+    func testSliceCarriedOnWithoutAChangeStartsFromTheCounter() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(60), warmup: 0, baseline: 600_000_000)
+        feed(&m, [(90, 1_200_000_000), (120, 1_800_000_000)])
+        XCTAssertEqual(m.finish()?.bytes, 1_200_000_000)
+    }
+
+    func testStalledContaminatedAndEmptySlicesYieldNothing() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0), (10, 100), (40, 100), (56, 100), (57, 200)])    // 46 s without progress
+        XCTAssertNil(m.finish())
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0), (30, 900_000_000)], contaminated: true)         // a download ran too
+        XCTAssertNil(m.finish())
+        XCTAssertTrue(m.dropReason.contains("download"))
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0), (30, 0)])
+        XCTAssertNil(m.finish())
+        m.begin(at: at(0), warmup: 0)
+        m.sample(time: at(0), bytes: nil, contaminated: false, rateLimited: false, failed: false)
+        XCTAssertNil(m.finish())
+        XCTAssertNil(m.finish())                                           // no slice running
+    }
+
+    func testCounterResetDropsTheSlice() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 900_000_000), (10, 5)])
+        XCTAssertNil(m.finish())
+    }
+
+    func testRateLimitedSliceNeedsItsDataAndNeverYieldsAnEmptyPenalty() {
+        var m = TransfersSliceMeter()
+        m.begin(at: at(0), warmup: 0)
+        m.sample(time: at(0), bytes: 0, contaminated: false, rateLimited: true, failed: false)
+        XCTAssertNil(m.finish())                                           // nothing measured: no penalty either
+        XCTAssertEqual(m.dropReason, "no data")
+        m.begin(at: at(0), warmup: 0)
+        XCTAssertNil(m.finish(extraRateLimited: true))
+        XCTAssertEqual(m.dropReason, "no data")
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0)])
+        m.sample(time: at(20), bytes: 400_000_000, contaminated: false, rateLimited: true, failed: false)
+        let r = try! XCTUnwrap(m.finish())
+        XCTAssertTrue(r.rateLimited)                                       // with data: a penalty that carries its numbers
+        XCTAssertEqual(r.bytes, 400_000_000)
+        XCTAssertEqual(r.duration, 20, accuracy: 0.001)
+        m.begin(at: at(0), warmup: 0)
+        feed(&m, [(0, 0), (20, 400_000_000)])
+        XCTAssertEqual(m.finish(extraFailed: true)?.failed, true)
+    }
+
+    func testDueAfterTheSliceLength() {
+        var m = TransfersSliceMeter()
+        XCTAssertFalse(m.isDue(now: at(1000)))
+        m.begin(at: at(0), warmup: 0)
+        XCTAssertFalse(m.isDue(now: at(59)))
+        XCTAssertTrue(m.isDue(now: at(60)))
+        m.sample(time: at(0), bytes: 5, contaminated: false, rateLimited: false, failed: false)
+        XCTAssertEqual(m.lastBytes, 5)
+    }
+}
+
+private extension Int64 {
+    func asMBps(_ seconds: TimeInterval) -> Double { Double(self) / 1_000_000 / seconds }
+}
+
+@MainActor
+final class TransfersSliceControllerTests: XCTestCase {
+    private var dir: URL!
+    private var now = t0
+    private var logs: [String] = []
+    override func setUpWithError() throws { dir = try makeTempDir() }
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: dir) }
+
+    private func make(backend: Backend = sftpBackend(), arm: Int = 4, client: TransfersClient, seed: UInt64 = 5) -> TransfersController {
+        let rng = SeededUnitRandom(seed: seed)
+        return TransfersController(remote: makeRemote(backend: backend), startingArm: arm,
+                                   store: TransfersBanditStore(directory: dir), client: client, random: { rng.next() },
+                                   clock: { [unowned self] in self.now }, log: { [unowned self] in self.logs.append($0) })
+    }
+
+    /// One long copy, polled every 1.5 s. Throughput follows `rate(arm, seconds)`; after an arm change the old
+    /// arm's rate carries on for 10 s (running uploads keep their concurrency). Returns the arm at each slice start.
+    private func longCopy(_ c: TransfersController, seconds: Double, check: ((Double) -> Void)? = nil, rate: (Int, Double) -> Double) async -> [(time: Double, arm: Int)] {
+        let q = VFSQueue(queue: [entry(1, size: 500_000_000_000)])
+        var counter = 0.0
+        var t = 0.0
+        var simArm = c.currentArm, prevArm = c.currentArm, changedAt = -100.0
+        var changes: [(Double, Int)] = [(0, c.currentArm)]
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0))
+        while t < seconds {
+            t += 1.5
+            if c.currentArm != simArm { prevArm = simArm; simArm = c.currentArm; changedAt = t; changes.append((t, simArm)) }
+            let effective = t - changedAt < 10 ? prevArm : simArm
+            counter += rate(effective, t) * 1.5 * 1_000_000
+            now = t0.addingTimeInterval(t)
+            await c.observe(queue: q, stats: RcloneStats(bytes: Int64(counter)))
+            check?(t)
+        }
+        return changes.map { (time: $0.0, arm: $0.1) }
+    }
+
+    func testALongCopyReEvaluatesEveryMinuteAndFollowsABestArmThatMovesMidCopy() async throws {
+        let client = TransfersClient()
+        let c = make(client: client, seed: 9)
+        // 40 minutes in one copy; the best arm moves from 4 to 6 after 20 minutes.
+        var bestBefore = 0
+        _ = await longCopy(c, seconds: 2400, check: { t in
+            if t >= 1200 && t < 1201.5 { bestBefore = c.bandit.bestArm(for: .large) }
+        }) { arm, t in peakRate(arm, peak: t < 1200 ? 4 : 6) }
+        XCTAssertEqual(bestBefore, 4)
+        XCTAssertEqual(c.bandit.bestArm(for: .large), 6)
+        let counts = BanditConfiguration.defaultArms.compactMap { c.bandit.stats(for: .large, arm: $0)?.count }
+        XCTAssertGreaterThanOrEqual(counts.reduce(0, +), 30)           // about one sample per minute, over a single copy
+        let applied = await client.applied
+        XCTAssertGreaterThan(applied.count, 5)                          // the arm changed during the copy
+    }
+
+    func testExplorationRateIsAboutOneSliceInFiveWithJumpsAndRewardsAreAccurate() async throws {
+        let client = TransfersClient()
+        let c = make(client: client, seed: 21)
+        _ = await longCopy(c, seconds: 4800) { arm, _ in peakRate(arm, peak: 8) }        // 80 slices
+        XCTAssertEqual(c.bandit.bestArm(for: .large), 8)
+        let arms = BanditConfiguration.defaultArms
+        var total = 0, onBest = 0, far = 0
+        for a in arms {
+            guard let s = c.bandit.stats(for: .large, arm: a) else { continue }
+            total += s.count
+            if a == 8 { onBest = s.count }
+            if abs(arms.firstIndex(of: a)! - arms.firstIndex(of: 8)!) >= 2 { far += s.count }
+            XCTAssertEqual(s.mean, peakRate(a, peak: 8), accuracy: peakRate(a, peak: 8) * 0.05, "arm \(a)")
+        }
+        XCTAssertGreaterThanOrEqual(total, 70)
+        XCTAssertEqual(Double(total - onBest) / Double(total), 0.2, accuracy: 0.14)     // includes the cold start's probes
+        XCTAssertGreaterThan(far, 0)                                                     // uniform jumps happen
+    }
+
+    /// The VM's capped run: ~91 s slices whose counter is flat for 25 s and then runs fast, while the slow
+    /// `core/transferred` call makes the observe call arrive up to 25 s after the counter was read. The reward is the
+    /// counter's growth over the same two samples' own times, so it equals the true average over the slice.
+    func testRewardEqualsTheCounterRateEvenWhenSamplesArriveLate() async throws {
+        let remote = makeRemote(backend: sftpBackend())
+        var seed = TransfersBandit(clock: { self.now }, random: { 0.99 })
+        for arm in [3, 4, 6] { for _ in 0..<3 { seed.record(UploadBatch(bytes: 600_000_000, duration: arm == 4 ? 15 : 60, fileCount: 6), arm: arm) } }
+        try TransfersBanditStore(directory: dir).save(seed.state, remote: remote.id.uuidString)
+        let c = TransfersController(remote: remote, startingArm: 4, store: TransfersBanditStore(directory: dir), client: TransfersClient(),
+                                    random: { 0.99 }, clock: { [unowned self] in self.now }, log: { _ in })
+        let q = VFSQueue(queue: [entry(1, size: 500_000_000_000)])
+        func counter(_ t: Double) -> Double {                          // 91 s cycle: flat 25 s, then 66 s at 21.2 MB/s
+            let cycles = (t / 91).rounded(.down), r = t - cycles * 91
+            return (cycles * 66 + max(0, r - 25)) * 21.2e6
+        }
+        var closes: [(t: Double, reward: Double)] = []
+        var lastBatches = c.bandit.state.buckets["large"]?.batches ?? 0
+        var t = 0.0
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0), sampledAt: t0)
+        XCTAssertEqual(c.currentArm, 4)
+        while t < 600 {
+            t += 1.5
+            let sampled = t0.addingTimeInterval(t)
+            now = sampled.addingTimeInterval(Int(t / 1.5) % 40 == 0 ? 25 : 0)      // the observe call arrives 25 s late at the slice edges
+            await c.observe(queue: q, stats: RcloneStats(bytes: Int64(counter(t))), sampledAt: sampled)
+            let b = c.bandit.state.buckets["large"]?.batches ?? 0
+            if b > lastBatches, let r = c.bandit.state.buckets["large"]?.lastReward { closes.append((t, r)); lastBatches = b }
+        }
+        XCTAssertGreaterThanOrEqual(closes.count, 5)
+        for i in 1..<closes.count {
+            let span = closes[i].t - closes[i - 1].t
+            let truth = (counter(closes[i].t) - counter(closes[i - 1].t)) / span / 1e6
+            XCTAssertEqual(closes[i].reward, truth, accuracy: truth * 0.05, "slice \(i): \(closes)")
+        }
+    }
+
+    /// The failing VM run: 12-24 uploads in flight with tries = 1, no errors and a `delay` that keeps changing, and
+    /// about every other slice measured nothing. None of it may penalise an arm; the exploited arm stays at the floor.
+    func testNoPenaltyFromFluctuatingDelayOneTryAndEmptySlices() async throws {
+        let client = TransfersClient()
+        let c = make(client: client, seed: 17)
+        var counter = 0.0
+        var t = 0.0
+        func queue(_ i: Int) -> VFSQueue {
+            VFSQueue(queue: (1...12).map { VFSQueue.Entry(name: "f\($0)", id: UInt64($0), size: 100_000_000, uploading: true, tries: 1,
+                                                      delay: Double((i * 7 + $0 * 3) % 30)) })
+        }
+        await c.observe(queue: queue(0), stats: RcloneStats(bytes: 0, errors: 0), sampledAt: t0)
+        var tick = 0
+        while t < 17 * 60 {
+            t += 1.5; tick += 1
+            let slice = Int(t / 60)
+            if slice % 2 == 1 { counter += 25e6 * 1.5 }               // every other slice moves nothing (counter flat)
+            now = t0.addingTimeInterval(t)
+            await c.observe(queue: queue(tick), stats: RcloneStats(bytes: Int64(counter), errors: 0), sampledAt: now)
+        }
+        XCTAssertFalse(logs.contains { $0.contains("rate limited") }, "\(logs.filter { $0.contains("rate") })")
+        for arm in BanditConfiguration.defaultArms {
+            guard let s = c.bandit.stats(for: .large, arm: arm) else { continue }
+            XCTAssertGreaterThan(s.mean, 0, "arm \(arm)")
+            XCTAssertEqual(s.real, s.count, "arm \(arm) was penalised")
+        }
+        XCTAssertGreaterThanOrEqual(c.bandit.bestArm(for: .large), 4)
+        XCTAssertGreaterThanOrEqual(c.currentArm, 1)
+        XCTAssertTrue(logs.contains { $0.contains("slice ignored") })
+    }
+
+    func testFirstSlicesStayNearThePriorAndADriveRemoteNeverExceedsEight() async throws {
+        let client = TransfersClient()
+        let c = make(client: client, seed: 3)
+        let changes = await longCopy(c, seconds: 600) { arm, _ in peakRate(arm, peak: 4) }
+        XCTAssertTrue(changes.prefix(3).allSatisfy { [3, 4, 6].contains($0.arm) }, "\(changes)")
+        let drive = TransfersController.startupArm(for: makeRemote(backend: driveBackend()),
+                                                   store: TransfersBanditStore(directory: dir))
+        XCTAssertEqual(drive, 8)
+        let cap = BanditConfiguration.forBackend("drive")
+        XCTAssertEqual(cap.arms.max(), 8)
+        let d = TransfersController(remote: makeRemote(backend: driveBackend()),
+                                    startingArm: 8, store: TransfersBanditStore(directory: dir), client: TransfersClient(),
+                                    random: { 0.5 }, clock: { [unowned self] in self.now }, log: { _ in })
+        XCTAssertEqual(d.bandit.configuration.arms.max(), 8)
+    }
+
+    func testSlicesInsideOneLongFileStillMeasure() async throws {
+        let client = TransfersClient()
+        let c = make(client: client)
+        _ = await longCopy(c, seconds: 300) { _, _ in 20 }              // a single 500 GB file never completes
+        let counts = BanditConfiguration.defaultArms.compactMap { c.bandit.stats(for: .large, arm: $0)?.count }.reduce(0, +)
+        XCTAssertGreaterThanOrEqual(counts, 3)
+    }
+
+    func testADownloadDuringTheSliceDropsIt() async throws {
+        let c = make(client: TransfersClient())
+        let q = VFSQueue(queue: [entry(1, size: 500_000_000_000)])
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0))
+        now = now.addingTimeInterval(30)
+        let down = RcloneStats(transferring: [RcloneStats.Transfer(name: "movie.mkv", bytes: 1, size: 9)], bytes: 900_000_000)
+        await c.observe(queue: q, stats: down)
+        now = now.addingTimeInterval(31)
+        await c.observe(queue: q, stats: RcloneStats(bytes: 1_800_000_000))
+        XCTAssertNil(c.bandit.stats(for: .large, arm: 4))
+        XCTAssertTrue(logs.contains { $0.contains("slice ignored") })
+    }
+
+    func testRateLimitDuringASlicePenalisesItsArm() async throws {
+        let c = make(client: TransfersClient())
+        let q1 = VFSQueue(queue: [VFSQueue.Entry(name: "f", id: 1, size: 500_000_000_000, uploading: true, tries: 0)])
+        await c.observe(queue: q1, stats: RcloneStats(bytes: 0, errors: 0))
+        now = now.addingTimeInterval(20)
+        await c.observe(queue: q1, stats: RcloneStats(bytes: 400_000_000, errors: 1, lastError: "429 too many requests"))
+        now = now.addingTimeInterval(41)
+        await c.observe(queue: q1, stats: RcloneStats(bytes: 800_000_000, errors: 1, lastError: "429 too many requests"))
+        let s = try XCTUnwrap(c.bandit.stats(for: .large, arm: 4))
+        XCTAssertEqual(s.count, 1)
+        XCTAssertEqual(s.mean, 800.0 / 61 * 0.25, accuracy: 0.5)          // the slice's own 13 MB/s, penalised to a quarter
+    }
+
+    func testABatchSeenOnlyAtItsTailIsDroppedAsASliceButCreditedFromTheRecords() async throws {
+        let c = make(client: TransfersClient())
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 0), transferred: [])           // idle poll
+        // 15 s at 40 MB/s that started and ended between polls; the next poll catches only the drained queue ... 
+        // but a poll in between saw the last file still queued (1.5 s before the end).
+        let q = VFSQueue(queue: [entry(1, size: 600_000_000)])
+        now = t0.addingTimeInterval(33)
+        await c.observe(queue: q, stats: RcloneStats(bytes: 580_000_000), transferred: [])
+        now = t0.addingTimeInterval(34.5)
+        let r = rec("f", 18, 33.5, bytes: 600_000_000)                                              // 15 s, 40 MB/s
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 600_000_000), transferred: [r])
+        XCTAssertTrue(logs.contains { $0.contains("slice ignored") }, "\(logs)")
+        let s = try XCTUnwrap(c.bandit.stats(for: .large, arm: 4))
+        XCTAssertEqual(s.count, 1)
+        XCTAssertEqual(s.mean, 40, accuracy: 2)
+    }
+
+    func testEveryDropIsLoggedWithItsReason() async throws {
+        let c = make(client: TransfersClient())
+        let q = VFSQueue(queue: [entry(1, size: 30_000_000)])
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0))
+        now = now.addingTimeInterval(8)
+        await c.observe(queue: q, stats: RcloneStats(bytes: 30_000_000))
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 30_000_000))                    // 30 MB in 8 s: too little
+        XCTAssertTrue(logs.contains { $0.contains("slice ignored: too little data") }, "\(logs)")
+    }
+
+    func testFirstSliceOfABatchOfAnotherBucketGetsAnArmChosenForThatBucket() async throws {
+        // The small-file bucket learned that arm 8 is best; the idle pull (for the default "large" bucket) left arm 4.
+        let remote = makeRemote(backend: sftpBackend())
+        var seed = TransfersBandit(clock: { self.now }, random: { 0.99 })
+        for _ in 0..<3 { seed.record(UploadBatch(bytes: 600_000_000, duration: 20, fileCount: 600), arm: 8, bucket: .small) }
+        for arm in [6, 10] { for _ in 0..<2 { seed.record(UploadBatch(bytes: 200_000_000, duration: 20, fileCount: 600), arm: arm, bucket: .small) } }
+        try TransfersBanditStore(directory: dir).save(seed.state, remote: remote.id.uuidString)
+        let client = TransfersClient()
+        let rng = SeededUnitRandom(seed: 1)
+        let c = TransfersController(remote: remote, startingArm: 4, store: TransfersBanditStore(directory: dir), client: client,
+                                    random: { 0.99 + 0 * rng.next() }, clock: { [unowned self] in self.now }, log: { _ in })
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 0))                     // idle pull: bucket large, arm 4 stays
+        XCTAssertEqual(c.currentArm, 4)
+        let files = (1...400).map { entry(UInt64($0), size: 500_000) }                         // a small-file batch
+        await c.observe(queue: VFSQueue(queue: files), stats: RcloneStats(bytes: 0))
+        let applied = await client.applied
+        XCTAssertEqual(applied, [8])                                                           // re-chosen for the small bucket
+        XCTAssertEqual(c.currentArm, 8)
+        now = now.addingTimeInterval(30)
+        await c.observe(queue: VFSQueue(queue: files), stats: RcloneStats(bytes: 300_000_000))
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 300_000_000))
+        XCTAssertEqual(c.bandit.stats(for: .small, arm: 8)?.count, 4)                           // credited to the bucket and arm it ran as
+        XCTAssertNil(c.bandit.stats(for: .large, arm: 8))
+        XCTAssertNil(c.bandit.stats(for: .small, arm: 4))
+    }
+
+    func testAFailedApplyDoesNotConsumeAProbe() async throws {
+        let client = TransfersClient()
+        await client.failSets()
+        let c = make(client: client)
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 0))                       // probe 1: the prior itself
+        XCTAssertEqual(c.bandit.state.buckets["large"]?.probes, 1)
+        let q = VFSQueue(queue: [entry(1, size: 600_000_000)])
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0))
+        now = now.addingTimeInterval(40)
+        await c.observe(queue: q, stats: RcloneStats(bytes: 600_000_000))
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 600_000_000))             // next pull: a neighbour, apply fails
+        XCTAssertEqual(c.currentArm, 4)
+        XCTAssertEqual(c.bandit.state.buckets["large"]?.probes, 1)                             // given back, offered again next time
+        XCTAssertTrue(logs.contains { $0.contains("could not set") })
+    }
+
+    func testAStoppedControllerNeitherAppliesNorSavesAfterTheRemoteIsGone() async throws {
+        let client = TransfersClient()
+        let remote = makeRemote(backend: sftpBackend())
+        let rng = SeededUnitRandom(seed: 5)
+        let store = TransfersBanditStore(directory: dir)
+        let c = TransfersController(remote: remote, startingArm: 4, store: store, client: client, random: { rng.next() },
+                                    clock: { [unowned self] in self.now }, log: { _ in })
+        let q = VFSQueue(queue: [entry(1, size: 600_000_000)])
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0))
+        now = now.addingTimeInterval(40)
+        c.stop()                                                // the remote is unmounted / deleted
+        store.remove(remote: remote.id.uuidString)
+        await c.observe(queue: q, stats: RcloneStats(bytes: 600_000_000))
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 600_000_000))
+        XCTAssertNil(store.load(remote: remote.id.uuidString))
+        let applied = await client.applied
+        XCTAssertTrue(applied.isEmpty)
+    }
+
+    func testBackendPriorsFollowTheRealDescriptorTypeStrings() {
+        let cloud: Set<String> = ["drive", "azureblob", "b2", "google cloud storage"]
+        for d in BackendDescriptor.all {
+            let remote = makeRemote(backend: .rclone(RcloneBackendConfig(type: d.type, options: [:], secretOptions: [], remotePath: "")))
+            XCTAssertEqual(BanditConfiguration.forBackend(remote.transfersBackendID).startingArm, cloud.contains(d.type) ? 8 : 4, d.type)
+        }
+        XCTAssertEqual(BanditConfiguration.forBackend(makeRemote(backend: s3Backend()).transfersBackendID).startingArm, 8)
+        XCTAssertEqual(BanditConfiguration.forBackend(makeRemote(backend: sftpBackend()).transfersBackendID).startingArm, 4)
+    }
+
+    func testBatchOfAnotherBucketIsCreditedUnderItsBucket() async throws {
+        let c = make(client: TransfersClient())
+        let files = (1...200).map { entry(UInt64($0), size: 500_000) }
+        let q = VFSQueue(queue: files)
+        await c.observe(queue: q, stats: RcloneStats(bytes: 0))
+        now = now.addingTimeInterval(40)
+        await c.observe(queue: q, stats: RcloneStats(bytes: 100_000_000))
+        await c.observe(queue: VFSQueue(), stats: RcloneStats(bytes: 100_000_000))
+        XCTAssertEqual(c.bandit.stats(for: .small, arm: 4)?.count, 1)
+        XCTAssertNil(c.bandit.stats(for: .large, arm: 4))
+    }
+}

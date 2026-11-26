@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Parallel uploads (`--transfers`) are now tuned per remote automatically and re-evaluated every minute while uploading: RMount starts at 4 (8 for cloud storage such as S3, Azure, B2, Google Cloud and Google Drive), measures the real upload speed of each minute, mostly uses the fastest value and tries another one (usually a neighbour, sometimes any) in about one minute in five, so a long copy keeps following your connection (backing off on rate limits, capped at 8 for Google Drive). The current value shows in the Transfers window. Turn it off per remote under Performance > Uploads. (#123)
+
 ### Fixed
 
 - A mount that is still starting can now be cancelled from the menu, and deleting a remote or quitting during start no longer leaves rclone or the volume behind. Edit and Delete are disabled while a remote is starting or stopping.

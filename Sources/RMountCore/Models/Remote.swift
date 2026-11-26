@@ -19,6 +19,8 @@ public struct Remote: Codable, Equatable, Identifiable {
     /// True once this remote uses its own rclone cache dir. Remotes saved before that existed decode
     /// as false and keep rclone's old shared cache until a mount with no pending uploads.
     public var cacheMigrated: Bool
+    /// Let RMount tune rclone's parallel uploads (`--transfers`) from measured batch speed. Off = rclone's default.
+    public var autoTransfers: Bool
 
     public init(
         id: UUID,
@@ -31,7 +33,8 @@ public struct Remote: Codable, Equatable, Identifiable {
         readOnly: Bool = false,
         bandwidthLimit: String? = nil,
         updateMode: UpdateMode = .energySaver,
-        cacheMigrated: Bool = true
+        cacheMigrated: Bool = true,
+        autoTransfers: Bool = true
     ) {
         self.cacheMigrated = cacheMigrated
         self.id = id
@@ -44,6 +47,7 @@ public struct Remote: Codable, Equatable, Identifiable {
         self.readOnly = readOnly
         self.bandwidthLimit = bandwidthLimit
         self.updateMode = updateMode
+        self.autoTransfers = autoTransfers
     }
 
     /// The tuning actually used when mounting: the saved one, or the defaults for this
@@ -55,7 +59,7 @@ public struct Remote: Codable, Equatable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, backend, mountProtocol, autoMount, liveUpdates, tuning, readOnly, bandwidthLimit, updateMode, cacheMigrated
+        case id, name, backend, mountProtocol, autoMount, liveUpdates, tuning, readOnly, bandwidthLimit, updateMode, cacheMigrated, autoTransfers
     }
 
     public init(from decoder: Decoder) throws {
@@ -73,6 +77,7 @@ public struct Remote: Codable, Equatable, Identifiable {
         self.readOnly = try c.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
         self.bandwidthLimit = try c.decodeIfPresent(String.self, forKey: .bandwidthLimit)
         self.cacheMigrated = try c.decodeIfPresent(Bool.self, forKey: .cacheMigrated) ?? false
+        self.autoTransfers = (try? c.decodeIfPresent(Bool.self, forKey: .autoTransfers)) ?? true
     }
 }
 

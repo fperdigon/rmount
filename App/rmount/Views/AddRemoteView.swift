@@ -55,6 +55,7 @@ struct AddRemoteView: View {
     @State private var updateMode: UpdateMode
     @State private var tuning: TransferTuning
     @State private var readOnly: Bool
+    @State private var autoTransfers: Bool
     @State private var bandwidth: String
     @State private var testing = false
     @State private var testResult: ConnectionTestResult?
@@ -109,6 +110,7 @@ struct AddRemoteView: View {
         _updateMode = State(initialValue: editing?.updateMode ?? .energySaver)
         _tuning = State(initialValue: editing?.tuning ?? .defaults(for: proto, backendType: initialType, mode: editing?.updateMode ?? .energySaver))
         _readOnly = State(initialValue: editing?.readOnly ?? false)
+        _autoTransfers = State(initialValue: editing?.autoTransfers ?? true)
         _bandwidth = State(initialValue: editing?.bandwidthLimit ?? "")
         _sftp = State(initialValue: sftpDraft)
         _s3 = State(initialValue: s3Draft)
@@ -153,7 +155,7 @@ struct AddRemoteView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     form
-                    TuningSection(customize: $customizeTuning, updateMode: $updateMode, tuning: $tuning, mountProtocol: currentProtocol, backendType: currentBackendType)
+                    TuningSection(customize: $customizeTuning, updateMode: $updateMode, tuning: $tuning, autoTransfers: $autoTransfers, mountProtocol: currentProtocol, backendType: currentBackendType)
                     MountOptionsSection(readOnly: $readOnly, bandwidth: $bandwidth)
                 }
                 .padding(20)
@@ -257,6 +259,7 @@ struct AddRemoteView: View {
         remote.tuning = customizeTuning ? tuning : nil
         remote.updateMode = updateMode
         remote.readOnly = readOnly
+        remote.autoTransfers = autoTransfers
         let bw = bandwidth.trimmingCharacters(in: .whitespaces)
         remote.bandwidthLimit = bw.isEmpty ? nil : bw
         error = nil

@@ -2,7 +2,7 @@ import XCTest
 import Combine
 @testable import RMountCore
 
-private final class FakeMounter: Mounter {
+final class FakeMounter: Mounter {
     private let lock = NSLock()
     private var _failMount = false
     private var _webdavMounts: [(port: Int, baseurl: String)] = []

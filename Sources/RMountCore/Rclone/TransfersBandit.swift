@@ -364,6 +364,11 @@ public struct TransfersBanditStore {
         try Self.encoder.encode(state).write(to: fileURL(remote: id), options: .atomic)
     }
 
+    /// Deletes the remote's learned state (when the remote is deleted). Missing file is fine.
+    public func remove(remote id: String) {
+        try? FileManager.default.removeItem(at: fileURL(remote: id))
+    }
+
     private static let encoder: JSONEncoder = {
         let e = JSONEncoder(); e.dateEncodingStrategy = .iso8601; e.outputFormatting = [.sortedKeys]; return e
     }()
